@@ -6,10 +6,15 @@ use chrono::Duration;
 use chrono::prelude::*;
 use pcap_sys::{bpf_u_int32,u_char, u_int, u_short};
 use pktparse::*;
-use pktparse::ipv4::parse_ipv4_header;
+use pktparse::ipv4::{IPv4Header, parse_ipv4_header};
 use pktparse::ipv6::parse_ipv6_header;
 use pktparse::tcp::parse_tcp_header;
 use pktparse::udp::parse_udp_header;
+use etherparse::*;
+use etherparse::EtherType::Ipv4;
+use etherparse::ip_number::IPV4;
+use etherparse::IpHeader::Version4;
+use pktparse::ip::IPProtocol;
 
 /* Ethernet addresses are 6 bytes */
 pub const ETHER_ADDR_LEN : usize = 6;
@@ -117,28 +122,19 @@ fn ts_toDate(ts:i64)-> String{
     newdate
 }
 
-fn try_toDecode<'a>(data : &'a [u8]){
-    /*let ih = *IP_HEADER;
-    let uh = *UDP_HEADER;
-    let ip_len:u_int;
-    let sPort : u_short;
-    let dPort : u_short;
-
-    /* retireve the position of the ip header */
-    ih = (ip_header *) (data +
-        14); //length of ethernet header
-*/
+fn try_toDecode(data : &[u8]){
     let data_clone = data.clone();
-    let y = parse_ipv4_header(data_clone).unwrap();
-    let w = parse_ipv6_header(data_clone).unwrap();
-    let x = parse_tcp_header(data_clone).unwrap();
-    let z = parse_udp_header(data_clone).unwrap();
-    //println!("{:?}", x.0);
 
-    println!("{:?}", y.1);
-    println!("{:?}", w.1);
-    println!("{:?}", x.1);
-    println!("{:?}", z.1);
+    match PacketHeaders::from_ethernet_slice(data_clone) {
+        Err(value) => println!("Err {:?}", value),
+        Ok(value) => {
+            println!("link: {:?}", value.link);
+            println!("vlan: {:?}", value.vlan);
+            println!("ip: {:?}", value.ip);
+            println!("transport: {:?}", value.transport);
+        }
+    }
+
 
 }
 
@@ -158,7 +154,7 @@ fn start_sniffing(device: Device){
     /*let lt = cap.get_datalink();
     println!("{:?}", lt.get_description());
     let capture = Capture::dead(lt).unwrap();
-    let pr: BpfProgram = match capture.compile("port 23", true) {
+    let pr: BpfProgram = match capture.compile("ip", true) {
         Ok(p) =>p,
         Err(e) => {
             println!("{:?}", e);
@@ -168,7 +164,7 @@ fn start_sniffing(device: Device){
 
 
     let instructions = pr.get_instructions();
-    let def: String = instructions
+    let def = instructions
         .iter()
         .map(|ref op| format!("{}", op))
         .collect::<Vec<_>>()
@@ -176,22 +172,30 @@ fn start_sniffing(device: Device){
     println!("{},{}", instructions.len(), def);*/
 
     //cap.filter("udp", true);
+    let lt = cap.get_datalink();
+    println!("{:?}", lt.0 );
+    println!("{:?}", lt.get_name().unwrap() );
+    println!("{:?}", lt.get_description().unwrap() );
+
     let mut x = Pcap_Pkthdr{
         ts: "".to_string(),
         caplen: 0,
         len: 0,
     };
 
-    cap.filter("udp", true).unwrap();
+    cap.filter("tcp", true).unwrap();
     while let Ok(packet) = cap.next_packet() {
         let newdate = ts_toDate(packet.header.ts.tv_sec as i64);
         //println!("received packet! {:?}", packet);
+        //println!("{:?}", packet.data);
         x.ts = newdate;
         x.len = packet.header.len;
         x.caplen = packet.header.caplen;
-        println!("{:?}", x.ts);
+        //println!("{:?}", x.ts);
 
         try_toDecode(packet.data);
+        //println!("{:?}", parse_ipv4_header(packet.data).unwrap().1);
+
 
     }
 

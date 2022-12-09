@@ -13,6 +13,7 @@ pcap = "1.0.0"
 pcap-sys = "0.1.3"
 #net-parser-rs = "0.3"
 pktparse = "0.7.1"
+etherparse = "0.13.0"
 chrono = "0.4.23" # take a timestamp and convert to whatever other formats are needed.
 
 
