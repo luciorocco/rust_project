@@ -1,6 +1,8 @@
 use std::any::Any;
+use std::borrow::Borrow;
 use pcap::{Device, Capture, BpfProgram, Linktype};
 use std::io::{stdin} ;
+use std::ops::Deref;
 use std::process;
 use chrono::Duration;
 use chrono::prelude::*;
@@ -14,7 +16,7 @@ use etherparse::*;
 use etherparse::EtherType::Ipv4;
 use etherparse::ip_number::IPV4;
 use etherparse::IpHeader::Version4;
-use pktparse::ip::IPProtocol;
+use pktparse::ethernet::{EthernetFrame, parse_ethernet_frame};
 
 /* Ethernet addresses are 6 bytes */
 pub const ETHER_ADDR_LEN : usize = 6;
@@ -110,10 +112,6 @@ struct UDP_HEADER{
     crc : u_short  // Checksum
 }*/
 
-
-
-
-
 fn ts_toDate(ts:i64)-> String{
     let naive = NaiveDateTime::from_timestamp_opt(ts,0).unwrap();
     let _datetime: DateTime<Utc> = DateTime::from_utc(naive,Utc);
@@ -125,17 +123,17 @@ fn ts_toDate(ts:i64)-> String{
 fn try_toDecode(data : &[u8]){
     let data_clone = data.clone();
 
-    match PacketHeaders::from_ethernet_slice(data_clone) {
-        Err(value) => println!("Err {:?}", value),
-        Ok(value) => {
-            println!("link: {:?}", value.link);
-            println!("vlan: {:?}", value.vlan);
-            println!("ip: {:?}", value.ip);
-            println!("transport: {:?}", value.transport);
-        }
+    let x = parse_ethernet_frame(data_clone).unwrap();
+    println!("{:?}", x.1);
+
+    if(x.1.ethertype == pktparse::ethernet::EtherType::IPv4){
+        let y = parse_ipv4_header(data_clone).unwrap().1;
+        println!("{:?}", y);
+    }else {
+        let y = parse_ipv6_header(data_clone).unwrap().1;
+        println!("{:?}", y);
+
     }
-
-
 }
 
 fn start_sniffing(device: Device){
@@ -183,7 +181,7 @@ fn start_sniffing(device: Device){
         len: 0,
     };
 
-    cap.filter("tcp", true).unwrap();
+    cap.filter("udp", true).unwrap();
     while let Ok(packet) = cap.next_packet() {
         let newdate = ts_toDate(packet.header.ts.tv_sec as i64);
         //println!("received packet! {:?}", packet);
