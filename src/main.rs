@@ -5,6 +5,7 @@ use std::io::{stdin} ;
 use std::ops::Deref;
 use std::process;
 use chrono::Duration;
+use chrono::format::parse;
 use chrono::prelude::*;
 use pcap_sys::{bpf_u_int32,u_char, u_int, u_short};
 use pktparse::*;
@@ -16,8 +17,7 @@ use etherparse::*;
 use etherparse::EtherType::Ipv4;
 use etherparse::ip_number::IPV4;
 use etherparse::IpHeader::Version4;
-use pktparse::ethernet::{EthernetFrame, parse_ethernet_frame};
-
+use pktparse::ethernet::{EthernetFrame, parse_ethernet_frame, parse_vlan_ethernet_frame};
 /* Ethernet addresses are 6 bytes */
 pub const ETHER_ADDR_LEN : usize = 6;
 
@@ -121,8 +121,8 @@ fn ts_toDate(ts:i64)-> String{
 }
 
 fn try_toDecode(data : &[u8]){
-    let data_clone = data.clone();
-
+   let data_clone = data.clone();
+/*
     let x = parse_ethernet_frame(data_clone).unwrap();
     println!("{:?}", x.1);
 
@@ -133,7 +133,70 @@ fn try_toDecode(data : &[u8]){
         let y = parse_ipv6_header(data_clone).unwrap().1;
         println!("{:?}", y);
 
+    }*/
+
+    /*match PacketHeaders::from_ethernet_slice(data) {
+        Err(value) => println!("Err {:?}", value),
+        Ok(value) => {
+            println!("link: {:?}", value.link);
+            println!("vlan: {:?}", value.vlan);
+            println!("ip: {:?}", value.ip);
+            println!("transport: {:?}", value.transport);
+        }
+    }*/
+
+    //let x = Ethernet2Header::from_slice(data_clone).unwrap();
+    //println!("{:?}", x.0);
+
+
+    let ethernet_u8 = &data[0..14];
+    let ethernet = parse_vlan_ethernet_frame(ethernet_u8).unwrap();
+    println!("{:x?}", ethernet.1);
+
+
+    match ethernet.1.ethertype {
+        pktparse::ethernet::EtherType::IPv4 => {
+            let ipv4_u8 = &data[14..];
+            let ipv4 = parse_ipv4_header(ipv4_u8).unwrap();
+            println!("{:?}",ipv4.1);
+
+            match ipv4.1.protocol {
+                pktparse::ip::IPProtocol::TCP => {
+                    let tcp_u8 = &data[(14 + (ipv4.1.ihl as usize) * 4)..];
+                    let tcp = parse_tcp_header(tcp_u8).unwrap();
+                    println!("{:?}", tcp.1);
+                },
+                pktparse::ip::IPProtocol::UDP => {
+                    let udp_u8 = &data[(14 + (ipv4.1.ihl as usize) * 4)..];
+                    let udp = parse_udp_header(udp_u8).unwrap();
+                    println!("{:?}", udp.1);
+                }
+                _=> println!("ERROR")
+            }
+
+        } ,
+        pktparse::ethernet::EtherType::IPv6 => {
+            let ipv6_u8 = &data[14..54];
+            let ipv6 = parse_ipv6_header(ipv6_u8).unwrap();
+            println!("{:?}", ipv6.1);
+
+            match ipv6.1.next_header {
+                pktparse::ip::IPProtocol::TCP => {
+                    let tcp_u8 = &data[54..];
+                    let tcp = parse_tcp_header(tcp_u8).unwrap();
+                    println!("{:?}", tcp.1);
+                },
+                pktparse::ip::IPProtocol::UDP => {
+                    let udp_u8 = &data[54..];
+                    let udp = parse_udp_header(udp_u8).unwrap();
+                    println!("{:?}", udp.1);
+                }
+                _=> println!("ERROR")
+            }
+        }
+        _ => println!("ERROR")
     }
+
 }
 
 fn start_sniffing(device: Device){
@@ -181,11 +244,11 @@ fn start_sniffing(device: Device){
         len: 0,
     };
 
-    cap.filter("udp", true).unwrap();
+    cap.filter("", true).unwrap();
     while let Ok(packet) = cap.next_packet() {
         let newdate = ts_toDate(packet.header.ts.tv_sec as i64);
         //println!("received packet! {:?}", packet);
-        //println!("{:?}", packet.data);
+        println!("{:?}", packet.data);
         x.ts = newdate;
         x.len = packet.header.len;
         x.caplen = packet.header.caplen;
