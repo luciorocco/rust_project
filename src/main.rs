@@ -17,7 +17,9 @@ use etherparse::*;
 use etherparse::EtherType::Ipv4;
 use etherparse::ip_number::IPV4;
 use etherparse::IpHeader::Version4;
+use pktparse::arp::parse_arp_pkt;
 use pktparse::ethernet::{EthernetFrame, parse_ethernet_frame, parse_vlan_ethernet_frame};
+use pktparse::icmp::parse_icmp_header;
 /* Ethernet addresses are 6 bytes */
 pub const ETHER_ADDR_LEN : usize = 6;
 
@@ -149,7 +151,7 @@ fn try_toDecode(data : &[u8]){
     //println!("{:?}", x.0);
 
 
-    let ethernet_u8 = &data[0..14];
+    let ethernet_u8 = &data[..14];
     let ethernet = parse_vlan_ethernet_frame(ethernet_u8).unwrap();
     println!("{:x?}", ethernet.1);
 
@@ -171,12 +173,22 @@ fn try_toDecode(data : &[u8]){
                     let udp = parse_udp_header(udp_u8).unwrap();
                     println!("{:?}", udp.1);
                 }
+
+                pktparse::ip::IPProtocol::IGMP =>{
+                    println!("IGMP");
+                },
+
+                pktparse::ip::IPProtocol::ICMP => {
+                    let icmp_u8 = &data[(14 + (ipv4.1.ihl as usize) * 4)..];
+                    let icmp = parse_icmp_header(icmp_u8).unwrap();
+                    println!("{:?}", icmp.1);
+                }
                 _=> println!("ERROR")
             }
 
         } ,
         pktparse::ethernet::EtherType::IPv6 => {
-            let ipv6_u8 = &data[14..54];
+            let ipv6_u8 = &data[14..];
             let ipv6 = parse_ipv6_header(ipv6_u8).unwrap();
             println!("{:?}", ipv6.1);
 
@@ -191,9 +203,22 @@ fn try_toDecode(data : &[u8]){
                     let udp = parse_udp_header(udp_u8).unwrap();
                     println!("{:?}", udp.1);
                 }
+
+                pktparse::ip::IPProtocol::ICMP6 =>{
+                    let icmp6_u8 = &data[54..];
+                    let icmp6 = Icmpv6Slice::from_slice(icmp6_u8).unwrap().header();
+                    println!("{:?}", icmp6);
+                },
                 _=> println!("ERROR")
             }
-        }
+        },
+
+        pktparse::ethernet::EtherType::ARP =>{
+            let arp_u8 = &data[14..];
+            let arp = parse_arp_pkt(arp_u8).unwrap();
+            println!("{:?}", arp.1);
+
+        },
         _ => println!("ERROR")
     }
 
