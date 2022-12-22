@@ -16,6 +16,7 @@ pcap-parser = "0.14.0"
 pktparse = "0.7.1"
 etherparse = "0.13.0"
 chrono = "0.4.23" # take a timestamp and convert to whatever other formats are needed.
+clap = {version = "4.0.29", features = ["derive"] }
 
 
 

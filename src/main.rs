@@ -1,118 +1,22 @@
-use std::any::Any;
+mod cli;
+use std::process;
 use std::borrow::Borrow;
-use pcap::{Device, Capture, BpfProgram, Linktype};
+use pcap::{Device, Capture};
 use std::io::{stdin} ;
 use std::ops::Deref;
-use std::process;
-use chrono::Duration;
-use chrono::format::parse;
 use chrono::prelude::*;
-use pcap_sys::{bpf_u_int32,u_char, u_int, u_short};
 use pktparse::*;
 use pktparse::ipv4::{IPv4Header, parse_ipv4_header};
 use pktparse::ipv6::parse_ipv6_header;
 use pktparse::tcp::parse_tcp_header;
 use pktparse::udp::parse_udp_header;
 use etherparse::*;
-use etherparse::EtherType::Ipv4;
-use etherparse::ip_number::IPV4;
-use etherparse::IpHeader::Version4;
 use pktparse::arp::parse_arp_pkt;
-use pktparse::ethernet::{EthernetFrame, parse_ethernet_frame, parse_vlan_ethernet_frame};
+use pktparse::ethernet::{EthernetFrame, parse_ethernet_frame, parse_vlan_ethernet_frame, VlanEthernetFrame};
 use pktparse::icmp::parse_icmp_header;
-/* Ethernet addresses are 6 bytes */
-pub const ETHER_ADDR_LEN : usize = 6;
+use clap::Parser;
+use pcap_parser::nom::IResult;
 
-struct Pcap_Pkthdr {
-    ts : String, /* time stamp */
-    caplen : bpf_u_int32,  /* length of portion present */
-    len : bpf_u_int32 /* length this packet (off wire) */
-}
-
-
-
-/*struct Sniff_Ethernet {
-    ether_dhost: u_char, /* Destination host address */
-    ether_shost : u_char, /* Source host address */
-    ether_type : u_short /* IP? ARP? RARP? etc */
-}
-
-struct Sniff_Ip {
-    ip_vhl: u_char,		/* version << 4 | header length >> 2 */
-    ip_tos: u_char ,		/* type of service */
-    ip_len: u_short ,		/* total length */
-    ip_id: u_short ,		/* identification */
-    ip_off: u_short ,		/* fragment offset field */
-    ip_ttl: u_char ,		/* time to live */
-    ip_p: u_char ,		/* protocol */
-    ip_sum: u_short,		/* checksum */
-    //struct {in_addr, ip_src,ip_dst}
-}
-
-impl Sniff_Ip{
-    const IP_RF: u32 =  0x8000;		/* reserved fragment flag */
-    const IP_DF: u32 =  0x4000;		/* don't fragment flag */
-    const IP_MF: u32 =  0x2000;		/* more fragments flag */
-    const IP_OFFMASK: u32 =  0x1fff;	/* mask for fragmenting bits */
-}
-
-/* TCP header */
-type  tcp_seq = u_int;
-
-struct Sniff_Tcp {
-    th_sport: u_short,	/* source port */
-    th_dport : u_short,	/* destination port */
-    th_seq: tcp_seq,		/* sequence number */
-    th_ack : tcp_seq,		/* acknowledgement number */
-    th_offx2 : u_char,	/* data offset, rsvd */
-    //#define TH_OFF(th)	(((th)->th_offx2 & 0xf0) > 4)
-    th_flags : u_char,
-    //#define TH_FLAGS (TH_FIN|TH_SYN|TH_RST|TH_ACK|TH_URG|TH_ECE|TH_CWR)
-    th_win : u_short,		/* window */
-    th_sum : u_short,		/* checksum */
-    th_urp : u_short		/* urgent pointer */
-}
-
-impl Sniff_Tcp{
-    const TH_FIN : u32 = 0x01;
-    const TH_SYN : u32 =  0x02;
-    const TH_RST : u32 =  0x04;
-    const TH_PUSH : u32 =  0x08;
-    const TH_ACK : u32 =  0x10;
-    const TH_URG : u32 =  0x20;
-    const TH_ECE : u32 =  0x40;
-    const TH_CWR : u32 =  0x80;
-}*/
-/*4 byte ip address*/
-/*struct IP_ADDRESS{
-    byte1 : u_char,
-    byte2 : u_char,
-    byte3 : u_char,
-    byte4 : u_char
-}
-
-/* IPv4 header */
-struct IP_HEADER{
-    ver_ihl: u_char, // Version (4 bits) + IP header length (4 bits)
-    tos: u_char,     // Type of service
-    tlen: u_short,    // Total length
-    identification: u_short,  // Identification
-    flags_fo: u_short, // Flags (3 bits) + Fragment offset (13 bits)
-    ttl: u_char,      // Time to live
-    proto: u_char  ,    // Protocol
-    crc: u_short,      // Header checksum
-    saddr: ip_address , // Source address
-    daddr: ip_address, // Destination address
-    op_pad: u_int  ,     // Option + Padding
-}
-
-/* UDP header*/
-struct UDP_HEADER{
-    sport: u_short,  // Source port
-    dport : u_short, // Destination port
-    len: u_short,   // Datagram length
-    crc : u_short  // Checksum
-}*/
 
 fn ts_toDate(ts:i64)-> String{
     let naive = NaiveDateTime::from_timestamp_opt(ts,0).unwrap();
@@ -122,102 +26,87 @@ fn ts_toDate(ts:i64)-> String{
     newdate
 }
 
-fn try_toDecode(data : &[u8]){
-   let data_clone = data.clone();
-/*
-    let x = parse_ethernet_frame(data_clone).unwrap();
-    println!("{:?}", x.1);
+fn ethernetDecode(ethernet_u8: &[u8])-> VlanEthernetFrame{
+    let ethernet = match parse_vlan_ethernet_frame(ethernet_u8) {
+        Ok(x) => {x.1}
+        Err(e) => {println!("ERRORE")}
+    };
+    println!("{:x?}", ethernet);
+    ethernet
+}
 
-    if(x.1.ethertype == pktparse::ethernet::EtherType::IPv4){
-        let y = parse_ipv4_header(data_clone).unwrap().1;
-        println!("{:?}", y);
-    }else {
-        let y = parse_ipv6_header(data_clone).unwrap().1;
-        println!("{:?}", y);
+fn ipv4Decode(ipv4_u8: &[u8]){
+    let ipv4 = parse_ipv4_header(ipv4_u8).unwrap();
+    println!("{:?}",ipv4.1);
 
-    }*/
-
-    /*match PacketHeaders::from_ethernet_slice(data) {
-        Err(value) => println!("Err {:?}", value),
-        Ok(value) => {
-            println!("link: {:?}", value.link);
-            println!("vlan: {:?}", value.vlan);
-            println!("ip: {:?}", value.ip);
-            println!("transport: {:?}", value.transport);
+    match ipv4.1.protocol {
+        pktparse::ip::IPProtocol::TCP => {
+            let tcp_u8 = &data[(14 + (ipv4.1.ihl as usize) * 4)..];
+            let tcp = parse_tcp_header(tcp_u8).unwrap();
+            println!("{:?}", tcp.1);
+        },
+        pktparse::ip::IPProtocol::UDP => {
+            let udp_u8 = &data[(14 + (ipv4.1.ihl as usize) * 4)..];
+            let udp = parse_udp_header(udp_u8).unwrap();
+            println!("{:?}", udp.1);
         }
-    }*/
 
-    //let x = Ethernet2Header::from_slice(data_clone).unwrap();
-    //println!("{:?}", x.0);
+        pktparse::ip::IPProtocol::IGMP =>{
+            println!("IGMP");
+        },
 
+        pktparse::ip::IPProtocol::ICMP => {
+            let icmp_u8 = &data[(14 + (ipv4.1.ihl as usize) * 4)..];
+            let icmp = parse_icmp_header(icmp_u8).unwrap();
+            println!("{:?}", icmp.1);
+        }
+        _=> println!("ERROR")
+    }
+}
 
-    let ethernet_u8 = &data[..14];
-    let ethernet = parse_vlan_ethernet_frame(ethernet_u8).unwrap();
-    println!("{:x?}", ethernet.1);
+fn ipv6Decode(ipv6_u8: &[u8]){
+    let ipv6 = parse_ipv6_header(ipv6_u8).unwrap();
+    println!("{:?}",ipv4.1);
 
+    match ipv6.1.next_header {
+        pktparse::ip::IPProtocol::TCP => {
+            let tcp_u8 = &data[54..];
+            let tcp = parse_tcp_header(tcp_u8).unwrap();
+            println!("{:?}", tcp.1);
+        },
+        pktparse::ip::IPProtocol::UDP => {
+            let udp_u8 = &data[54..];
+            let udp = parse_udp_header(udp_u8).unwrap();
+            println!("{:?}", udp.1);
+        }
 
-    match ethernet.1.ethertype {
+        pktparse::ip::IPProtocol::ICMP6 =>{
+            let icmp6_u8 = &data[54..];
+            let icmp6 = Icmpv6Slice::from_slice(icmp6_u8).unwrap().header();
+            println!("{:?}", icmp6);
+        },
+        _=> println!("ERROR")
+    }
+}
+
+fn arpDecode(arp_u8: &[u8]){
+    let arp = parse_arp_pkt(arp_u8).unwrap();
+    println!("{:?}", arp.1);
+}
+
+fn try_toDecode(data : &[u8]){
+    let ethernet = ethernetDecode( &data[..14]);
+
+    match ethernet.ethertype {
         pktparse::ethernet::EtherType::IPv4 => {
-            let ipv4_u8 = &data[14..];
-            let ipv4 = parse_ipv4_header(ipv4_u8).unwrap();
-            println!("{:?}",ipv4.1);
-
-            match ipv4.1.protocol {
-                pktparse::ip::IPProtocol::TCP => {
-                    let tcp_u8 = &data[(14 + (ipv4.1.ihl as usize) * 4)..];
-                    let tcp = parse_tcp_header(tcp_u8).unwrap();
-                    println!("{:?}", tcp.1);
-                },
-                pktparse::ip::IPProtocol::UDP => {
-                    let udp_u8 = &data[(14 + (ipv4.1.ihl as usize) * 4)..];
-                    let udp = parse_udp_header(udp_u8).unwrap();
-                    println!("{:?}", udp.1);
-                }
-
-                pktparse::ip::IPProtocol::IGMP =>{
-                    println!("IGMP");
-                },
-
-                pktparse::ip::IPProtocol::ICMP => {
-                    let icmp_u8 = &data[(14 + (ipv4.1.ihl as usize) * 4)..];
-                    let icmp = parse_icmp_header(icmp_u8).unwrap();
-                    println!("{:?}", icmp.1);
-                }
-                _=> println!("ERROR")
-            }
-
+            ipv4Decode(&data[14..]);
         } ,
         pktparse::ethernet::EtherType::IPv6 => {
-            let ipv6_u8 = &data[14..];
-            let ipv6 = parse_ipv6_header(ipv6_u8).unwrap();
-            println!("{:?}", ipv6.1);
-
-            match ipv6.1.next_header {
-                pktparse::ip::IPProtocol::TCP => {
-                    let tcp_u8 = &data[54..];
-                    let tcp = parse_tcp_header(tcp_u8).unwrap();
-                    println!("{:?}", tcp.1);
-                },
-                pktparse::ip::IPProtocol::UDP => {
-                    let udp_u8 = &data[54..];
-                    let udp = parse_udp_header(udp_u8).unwrap();
-                    println!("{:?}", udp.1);
-                }
-
-                pktparse::ip::IPProtocol::ICMP6 =>{
-                    let icmp6_u8 = &data[54..];
-                    let icmp6 = Icmpv6Slice::from_slice(icmp6_u8).unwrap().header();
-                    println!("{:?}", icmp6);
-                },
-                _=> println!("ERROR")
-            }
+            ipv6Decode(&data[14..]);
         },
 
         pktparse::ethernet::EtherType::ARP =>{
-            let arp_u8 = &data[14..];
-            let arp = parse_arp_pkt(arp_u8).unwrap();
-            println!("{:?}", arp.1);
-
+            arpDecode(&data[14..]);
         },
         _ => println!("ERROR")
     }
@@ -229,75 +118,30 @@ fn start_sniffing(device: Device){
     let mut cap = Capture::from_device(device)
         .unwrap()
         .promisc(true)
-
         .open()
-
         .unwrap()
-
-
         ;
 
-    /*let lt = cap.get_datalink();
-    println!("{:?}", lt.get_description());
-    let capture = Capture::dead(lt).unwrap();
-    let pr: BpfProgram = match capture.compile("ip", true) {
-        Ok(p) =>p,
-        Err(e) => {
-            println!("{:?}", e);
-            process::exit(1);
-        }
-    };
-
-
-    let instructions = pr.get_instructions();
-    let def = instructions
-        .iter()
-        .map(|ref op| format!("{}", op))
-        .collect::<Vec<_>>()
-        .join(",");
-    println!("{},{}", instructions.len(), def);*/
-
-    //cap.filter("udp", true);
     let lt = cap.get_datalink();
     println!("{:?}", lt.0 );
     println!("{:?}", lt.get_name().unwrap() );
     println!("{:?}", lt.get_description().unwrap() );
 
-    let mut x = Pcap_Pkthdr{
-        ts: "".to_string(),
-        caplen: 0,
-        len: 0,
-    };
+
 
     cap.filter("", true).unwrap();
     while let Ok(packet) = cap.next_packet() {
         let newdate = ts_toDate(packet.header.ts.tv_sec as i64);
-        //println!("received packet! {:?}", packet);
-        println!("{:?}", packet.data);
-        x.ts = newdate;
-        x.len = packet.header.len;
-        x.caplen = packet.header.caplen;
-        //println!("{:?}", x.ts);
-
         try_toDecode(packet.data);
-        //println!("{:?}", parse_ipv4_header(packet.data).unwrap().1);
-
-
     }
-
-
 }
 
-
-fn main() {
+fn chose_device(){
     let mut s = String::new();
-    let mut i : usize = 0;
     let device = pcap::Device::list().unwrap();
-
     println!("Choose your device");
-
     device.iter().enumerate().for_each(|x|{
-        println!("Num: {}  Desc: {:?} ", x.0  , x.1.desc)
+        println!("Num: {}  Desc: {:?}  Address{:?} ", x.0  , x.1.desc, x.1.addresses)
     });
 
     loop{
@@ -306,7 +150,7 @@ fn main() {
         //CHECK INPUT AND START SNIFFING
         match s.trim().parse::<usize>() {
             Ok(ok) => {
-                i = s.trim().parse::<usize>().ok().unwrap();
+                let i = s.trim().parse::<usize>().ok().unwrap();
                 if i <= device.len() -1 {
                     start_sniffing(device[i].clone());
                     break
@@ -323,7 +167,12 @@ fn main() {
             }
         }
     }
+}
 
 
 
+fn main() {
+    let args = cli::RustArgs::parse();
+    println!("{:?}",args);
+    chose_device();
 }
