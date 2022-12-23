@@ -29,13 +29,16 @@ fn ts_toDate(ts:i64)-> String{
 fn ethernetDecode(ethernet_u8: &[u8])-> VlanEthernetFrame{
     let ethernet = match parse_vlan_ethernet_frame(ethernet_u8) {
         Ok(x) => {x.1}
-        Err(e) => {println!("ERRORE")}
+        Err(e) => {
+            println!("ERRORE");
+            process::exit(1);
+        }
     };
     println!("{:x?}", ethernet);
     ethernet
 }
 
-fn ipv4Decode(ipv4_u8: &[u8]){
+fn ipv4Decode(ipv4_u8: &[u8], data: &[u8] ){
     let ipv4 = parse_ipv4_header(ipv4_u8).unwrap();
     println!("{:?}",ipv4.1);
 
@@ -64,9 +67,9 @@ fn ipv4Decode(ipv4_u8: &[u8]){
     }
 }
 
-fn ipv6Decode(ipv6_u8: &[u8]){
+fn ipv6Decode(ipv6_u8: &[u8], data: &[u8]){
     let ipv6 = parse_ipv6_header(ipv6_u8).unwrap();
-    println!("{:?}",ipv4.1);
+    println!("{:?}",ipv6.1);
 
     match ipv6.1.next_header {
         pktparse::ip::IPProtocol::TCP => {
@@ -99,10 +102,10 @@ fn try_toDecode(data : &[u8]){
 
     match ethernet.ethertype {
         pktparse::ethernet::EtherType::IPv4 => {
-            ipv4Decode(&data[14..]);
+            ipv4Decode(&data[14..], data);
         } ,
         pktparse::ethernet::EtherType::IPv6 => {
-            ipv6Decode(&data[14..]);
+            ipv6Decode(&data[14..], data);
         },
 
         pktparse::ethernet::EtherType::ARP =>{
