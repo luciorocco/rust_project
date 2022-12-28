@@ -1,10 +1,13 @@
 mod cli;
 use std::process;
 use std::borrow::Borrow;
-use pcap::{Device, Capture};
+use pcap::{Device, Capture, PacketCodec, PacketHeader, Packet};
 use std::io::{stdin} ;
 use std::ops::Deref;
+use std::str::from_utf8;
+use std::string::FromUtf8Error;
 use chrono::prelude::*;
+use clap::builder::Str;
 use pktparse::*;
 use pktparse::ipv4::{IPv4Header, parse_ipv4_header};
 use pktparse::ipv6::parse_ipv6_header;
@@ -16,6 +19,29 @@ use pktparse::ethernet::{EthernetFrame, parse_ethernet_frame, parse_vlan_etherne
 use pktparse::icmp::parse_icmp_header;
 use clap::Parser;
 use pcap_parser::nom::IResult;
+use std::collections::HashMap;
+use std::ptr::null;
+
+#[derive(PartialEq, Eq, Hash,Debug)]
+pub struct k{
+    pub type_eth : String,
+    pub source_address : String,
+    pub destination_address: String,
+    pub source_port: Option<u16>,
+    pub dest_port: Option<u16>,
+    pub protocol: String,
+}
+
+#[derive(Debug)]
+pub struct summary{
+    pub ts_i: String,
+    pub ts_f: String,
+    pub len: u32
+}
+
+
+type Summary = HashMap<k, summary>;
+
 
 
 fn ts_toDate(ts:i64)-> String{
@@ -26,7 +52,7 @@ fn ts_toDate(ts:i64)-> String{
     newdate
 }
 
-fn ethernetDecode(ethernet_u8: &[u8])-> VlanEthernetFrame{
+fn ethernetDecode(ethernet_u8: &[u8]) -> VlanEthernetFrame{
     let ethernet = match parse_vlan_ethernet_frame(ethernet_u8) {
         Ok(x) => {x.1}
         Err(e) => {
@@ -34,93 +60,156 @@ fn ethernetDecode(ethernet_u8: &[u8])-> VlanEthernetFrame{
             process::exit(1);
         }
     };
+
     println!("{:x?}", ethernet);
     ethernet
 }
 
-fn ipv4Decode(ipv4_u8: &[u8], data: &[u8] ){
+fn ipv4Decode(ipv4_u8: &[u8], data: &[u8], src: &mut String, dst: &mut String, prot: &mut String, srp: &mut u16, dsp: &mut u16){
     let ipv4 = parse_ipv4_header(ipv4_u8).unwrap();
+    *src = ipv4.1.source_addr.to_string();
+    *dst = ipv4.1.dest_addr.to_string();
     println!("{:?}",ipv4.1);
 
     match ipv4.1.protocol {
         pktparse::ip::IPProtocol::TCP => {
             let tcp_u8 = &data[(14 + (ipv4.1.ihl as usize) * 4)..];
             let tcp = parse_tcp_header(tcp_u8).unwrap();
+            *prot = "TCP".to_string();
+            *srp = tcp.1.source_port;
+            *dsp = tcp.1.dest_port;
             println!("{:?}", tcp.1);
         },
         pktparse::ip::IPProtocol::UDP => {
             let udp_u8 = &data[(14 + (ipv4.1.ihl as usize) * 4)..];
             let udp = parse_udp_header(udp_u8).unwrap();
+            *prot = "UDP".to_string();
+            *srp = udp.1.source_port;
+            *dsp = udp.1.dest_port;
             println!("{:?}", udp.1);
         }
 
         pktparse::ip::IPProtocol::IGMP =>{
+            *prot = "IGMP".to_string();
             println!("IGMP");
         },
 
         pktparse::ip::IPProtocol::ICMP => {
             let icmp_u8 = &data[(14 + (ipv4.1.ihl as usize) * 4)..];
             let icmp = parse_icmp_header(icmp_u8).unwrap();
+            *prot = "ICMP".to_string();
             println!("{:?}", icmp.1);
         }
         _=> println!("ERROR")
     }
 }
 
-fn ipv6Decode(ipv6_u8: &[u8], data: &[u8]){
+fn ipv6Decode(ipv6_u8: &[u8], data: &[u8], src: &mut String, dst: &mut String, prot: &mut String, srp: &mut u16, dsp: &mut u16){
     let ipv6 = parse_ipv6_header(ipv6_u8).unwrap();
+    *src = ipv6.1.source_addr.to_string();
+    *dst = ipv6.1.dest_addr.to_string();
     println!("{:?}",ipv6.1);
 
     match ipv6.1.next_header {
         pktparse::ip::IPProtocol::TCP => {
             let tcp_u8 = &data[54..];
             let tcp = parse_tcp_header(tcp_u8).unwrap();
+            *prot = "TCP".to_string();
+            *srp = tcp.1.source_port;
+            *dsp = tcp.1.dest_port;
             println!("{:?}", tcp.1);
         },
         pktparse::ip::IPProtocol::UDP => {
             let udp_u8 = &data[54..];
             let udp = parse_udp_header(udp_u8).unwrap();
+            *prot = "UDP".to_string();
+            *srp = udp.1.source_port;
+            *dsp = udp.1.dest_port;
             println!("{:?}", udp.1);
         }
 
         pktparse::ip::IPProtocol::ICMP6 =>{
-            let icmp6_u8 = &data[54..];
-            let icmp6 = Icmpv6Slice::from_slice(icmp6_u8).unwrap().header();
-            println!("{:?}", icmp6);
+            *prot = "ICMP6".to_string();
+            println!("ICMP6");
         },
         _=> println!("ERROR")
     }
 }
 
-fn arpDecode(arp_u8: &[u8]){
+fn arpDecode(arp_u8: &[u8], src: &mut String, dst: &mut String){
     let arp = parse_arp_pkt(arp_u8).unwrap();
     println!("{:?}", arp.1);
 }
 
-fn try_toDecode(data : &[u8]){
+fn try_toDecode(data : &[u8], sum: &mut Summary, newdate: String, i: u32){
     let ethernet = ethernetDecode( &data[..14]);
+    let mut tpe: String = String::new();
+    let mut src: String = String::new();
+    let mut dst: String = String::new();
+    let mut prot: String = String::new();
+    let mut srp: u16 = 0;
+    let mut dsp: u16 = 0;
 
     match ethernet.ethertype {
         pktparse::ethernet::EtherType::IPv4 => {
-            ipv4Decode(&data[14..], data);
-        } ,
+            tpe = "IPv4".to_string();
+            ipv4Decode(&data[14..], data, &mut src, &mut dst, &mut prot, &mut srp, &mut dsp);
+        },
         pktparse::ethernet::EtherType::IPv6 => {
-            ipv6Decode(&data[14..], data);
+            tpe = "IPv6".to_string();
+            ipv6Decode(&data[14..], data,  &mut src, &mut dst, &mut prot, &mut srp, &mut dsp);
         },
 
         pktparse::ethernet::EtherType::ARP =>{
-            arpDecode(&data[14..]);
+            tpe = "ARP".to_string();
+            arpDecode(&data[14..],  &mut src, &mut dst);
         },
         _ => println!("ERROR")
     }
+    sum.insert(k{
+        type_eth: tpe,
+        source_address: src,
+        destination_address: dst,
+        source_port: Some(srp),
+        dest_port: Some(dsp),
+        protocol: prot
+    }, summary{
+        ts_i: newdate.clone(),
+        ts_f: newdate.clone(),
+        len: i
+
+    });
+    sum.iter().for_each(|x|println!("{:?}",x));
 
 }
+
+/*#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PacketOwned {
+    pub header: PacketHeader,
+    pub data: Box<[u8]>,
+}
+
+/// Simple codec that tranform [`pcap::Packet`] into [`PacketOwned`]
+pub struct Codec;
+
+impl PacketCodec for Codec {
+    type Item = PacketOwned;
+
+    fn decode(&mut self, packet: Packet) -> Self::Item {
+        PacketOwned {
+            header: *packet.header,
+            data: packet.data.into(),
+        }
+    }
+}*/
 
 fn start_sniffing(device: Device){
     println!("{:?}", device);
     let mut cap = Capture::from_device(device)
         .unwrap()
         .promisc(true)
+        .timeout(1000)
+        //.buffer_size(3)
         .open()
         .unwrap()
         ;
@@ -133,10 +222,27 @@ fn start_sniffing(device: Device){
 
 
     cap.filter("", true).unwrap();
+
+
+    let mut sum : Summary = HashMap::new();
     while let Ok(packet) = cap.next_packet() {
         let newdate = ts_toDate(packet.header.ts.tv_sec as i64);
-        try_toDecode(packet.data);
+        //println!("{:?}", packet.header.len);
+        try_toDecode(packet.data, &mut sum, newdate, packet.header.len);
     }
+
+    /*for packet in cap.iter(Codec) {
+        let packet = packet.unwrap();
+
+        println!("{:?}", packet);
+    }*/
+
+    //println!("{:?}", cap.next_packet());
+
+
+
+
+
 }
 
 fn chose_device(){
