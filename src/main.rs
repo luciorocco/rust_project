@@ -20,15 +20,18 @@ use pktparse::icmp::parse_icmp_header;
 use clap::Parser;
 use pcap_parser::nom::IResult;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::ptr::null;
+use std::fs::File;
 
 #[derive(PartialEq, Eq, Hash,Debug)]
 pub struct k{
     pub type_eth : String,
     pub source_address : String,
     pub destination_address: String,
-    pub source_port: Option<u16>,
-    pub dest_port: Option<u16>,
+    pub source_port: u16,
+    pub dest_port: u16,
+    pub operation : String,
     pub protocol: String,
 }
 
@@ -99,7 +102,8 @@ fn ipv4Decode(ipv4_u8: &[u8], data: &[u8], src: &mut String, dst: &mut String, p
             let icmp = parse_icmp_header(icmp_u8).unwrap();
             *prot = "ICMP".to_string();
             println!("{:?}", icmp.1);
-        }
+        },
+
         _=> println!("ERROR")
     }
 }
@@ -136,10 +140,18 @@ fn ipv6Decode(ipv6_u8: &[u8], data: &[u8], src: &mut String, dst: &mut String, p
     }
 }
 
-fn arpDecode(arp_u8: &[u8], src: &mut String, dst: &mut String){
+fn arpDecode(arp_u8: &[u8], src: &mut String, dst: &mut String, operation :&mut String){
     let arp = parse_arp_pkt(arp_u8).unwrap();
+    *src = arp.1.src_addr.to_string();
+    *dst = arp.1.dest_addr.to_string();
+    match arp.1.operation {
+        pktparse::arp::Operation::Reply => *operation = "Reply".to_string(),
+        pktparse::arp::Operation::Request => *operation ="Request".to_string(),
+        pktparse::arp::Operation::Other(p) => *operation = "Other".to_string()
+    }
     println!("{:?}", arp.1);
 }
+
 
 fn try_toDecode(data : &[u8], sum: &mut Summary, newdate: String, i: u32){
     let ethernet = ethernetDecode( &data[..14]);
@@ -147,6 +159,7 @@ fn try_toDecode(data : &[u8], sum: &mut Summary, newdate: String, i: u32){
     let mut src: String = String::new();
     let mut dst: String = String::new();
     let mut prot: String = String::new();
+    let mut operation: String = "".to_string();
     let mut srp: u16 = 0;
     let mut dsp: u16 = 0;
 
@@ -162,23 +175,28 @@ fn try_toDecode(data : &[u8], sum: &mut Summary, newdate: String, i: u32){
 
         pktparse::ethernet::EtherType::ARP =>{
             tpe = "ARP".to_string();
-            arpDecode(&data[14..],  &mut src, &mut dst);
+            arpDecode(&data[14..],  &mut src, &mut dst, &mut operation);
         },
         _ => println!("ERROR")
     }
-    sum.insert(k{
-        type_eth: tpe,
-        source_address: src,
-        destination_address: dst,
-        source_port: Some(srp),
-        dest_port: Some(dsp),
-        protocol: prot
-    }, summary{
-        ts_i: newdate.clone(),
-        ts_f: newdate.clone(),
-        len: i
 
-    });
+     sum.entry(k {
+            type_eth: tpe.clone(),
+            source_address: src.clone(),
+            destination_address: dst.clone(),
+            source_port: srp.clone(),
+            dest_port: dsp.clone(),
+            operation: operation,
+            protocol: prot.clone()
+        }).and_modify(|x| {
+            x.len += i;
+            x.ts_f = newdate.clone();
+        }).or_insert(summary {
+         ts_i: newdate.clone(),
+         ts_f: newdate.clone(),
+         len: i,
+     });
+
     sum.iter().for_each(|x|println!("{:?}",x));
 
 }
@@ -225,10 +243,17 @@ fn start_sniffing(device: Device){
 
 
     let mut sum : Summary = HashMap::new();
-    while let Ok(packet) = cap.next_packet() {
-        let newdate = ts_toDate(packet.header.ts.tv_sec as i64);
-        //println!("{:?}", packet.header.len);
-        try_toDecode(packet.data, &mut sum, newdate, packet.header.len);
+    while let packet = cap.next_packet() {
+        match packet {
+            Ok(p) => {
+                let newdate = ts_toDate(p.header.ts.tv_sec as i64);
+                //println!("{:?}", packet.header.len);
+                //println!("{:?}", newdate);
+                try_toDecode(p.data, &mut sum, newdate, p.header.len);
+            }
+            Err(e) => eprintln!("{:?}", e)
+        }
+
     }
 
     /*for packet in cap.iter(Codec) {
@@ -278,10 +303,22 @@ fn chose_device(){
     }
 }
 
-
+fn create_file(p : PathBuf){
+    let mut file = match File::create(p){
+        Ok(p) => p,
+        Err(e)=> {
+            println!("{:?}", e);
+            process::exit(1);
+        }
+    };
+}
 
 fn main() {
     let args = cli::RustArgs::parse();
-    println!("{:?}",args);
+    let x = match args.path {
+        Some(p) => create_file(p),
+        None => println!("None path")
+    };
+    //println!("{:?}",args);
     chose_device();
 }

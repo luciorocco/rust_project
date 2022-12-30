@@ -8,6 +8,10 @@ pub struct RustArgs{
     #[arg(short, long)]
     pub path: Option<std::path::PathBuf>,
 
+    /// name file
+    #[arg(short, long)]
+    pub namefile: Option<String>,
+
     ///the interval after which a new report is to be generated in second
     #[arg(short, long)]
     pub duration: Option<usize>,
