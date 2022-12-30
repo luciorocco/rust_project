@@ -4,13 +4,9 @@ use clap::{Args,Parser};
 #[command(author, version, about, long_about = None)]
 pub struct RustArgs{
 
-    /// output file to be generated
+    /// output file to be generated example: "C:\Users\name\Desktop\..\nameFile"
     #[arg(short, long)]
     pub path: Option<std::path::PathBuf>,
-
-    /// name file
-    #[arg(short, long)]
-    pub namefile: Option<String>,
 
     ///the interval after which a new report is to be generated in second
     #[arg(short, long)]

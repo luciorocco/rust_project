@@ -22,7 +22,8 @@ use pcap_parser::nom::IResult;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::ptr::null;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
+use dirs::desktop_dir;
 
 #[derive(PartialEq, Eq, Hash,Debug)]
 pub struct k{
@@ -303,7 +304,7 @@ fn chose_device(){
     }
 }
 
-fn create_file(p : PathBuf){
+fn create_file(p : PathBuf) -> File{
     let mut file = match File::create(p){
         Ok(p) => p,
         Err(e)=> {
@@ -311,13 +312,18 @@ fn create_file(p : PathBuf){
             process::exit(1);
         }
     };
+    file
 }
 
 fn main() {
     let args = cli::RustArgs::parse();
     let x = match args.path {
         Some(p) => create_file(p),
-        None => println!("None path")
+        None => {
+            let mut x = dirs::desktop_dir().unwrap();
+            x.push("try.txt");
+            create_file(x)
+        }
     };
     //println!("{:?}",args);
     chose_device();
