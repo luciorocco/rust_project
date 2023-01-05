@@ -1,4 +1,6 @@
 mod cli;
+
+use std::any::Any;
 use std::process;
 use std::borrow::Borrow;
 use pcap::{Device, Capture, PacketCodec, PacketHeader, Packet};
@@ -24,8 +26,16 @@ use std::path::PathBuf;
 use std::ptr::null;
 use std::fs::{File, OpenOptions};
 use dirs::desktop_dir;
+use serde::{Serialize, Deserialize};
+use serde_json::Result;
+use serde_json_any_key::*;
+use regex::Regex;
+use std::thread;
+use std::thread::Builder;
+use std::sync::{Arc, Condvar, Mutex};
 
-#[derive(PartialEq, Eq, Hash,Debug)]
+
+#[derive(PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct k{
     pub type_eth : String,
     pub source_address : String,
@@ -36,7 +46,7 @@ pub struct k{
     pub protocol: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct summary{
     pub ts_i: String,
     pub ts_f: String,
@@ -202,32 +212,12 @@ fn try_toDecode(data : &[u8], sum: &mut Summary, newdate: String, i: u32){
 
 }
 
-/*#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PacketOwned {
-    pub header: PacketHeader,
-    pub data: Box<[u8]>,
-}
-
-/// Simple codec that tranform [`pcap::Packet`] into [`PacketOwned`]
-pub struct Codec;
-
-impl PacketCodec for Codec {
-    type Item = PacketOwned;
-
-    fn decode(&mut self, packet: Packet) -> Self::Item {
-        PacketOwned {
-            header: *packet.header,
-            data: packet.data.into(),
-        }
-    }
-}*/
-
-fn start_sniffing(device: Device){
+fn start_sniffing(device: Device, filter: &String) -> Summary{
     println!("{:?}", device);
     let mut cap = Capture::from_device(device)
         .unwrap()
         .promisc(true)
-        .timeout(1000)
+        .timeout(2000)
         //.buffer_size(3)
         .open()
         .unwrap()
@@ -235,15 +225,15 @@ fn start_sniffing(device: Device){
 
     let lt = cap.get_datalink();
     println!("{:?}", lt.0 );
-    println!("{:?}", lt.get_name().unwrap() );
+    println!("{:?}", lt.get_name().unwrap());
     println!("{:?}", lt.get_description().unwrap() );
 
 
 
-    cap.filter("", true).unwrap();
-
+    cap.filter(filter, true).unwrap();
 
     let mut sum : Summary = HashMap::new();
+    let mut i = 0;
     while let packet = cap.next_packet() {
         match packet {
             Ok(p) => {
@@ -254,29 +244,21 @@ fn start_sniffing(device: Device){
             }
             Err(e) => eprintln!("{:?}", e)
         }
-
+        //i += 1;
+        //if i == 10 { break }
     }
 
-    /*for packet in cap.iter(Codec) {
-        let packet = packet.unwrap();
-
-        println!("{:?}", packet);
-    }*/
-
-    //println!("{:?}", cap.next_packet());
-
-
-
-
-
+    sum
 }
 
-fn chose_device(){
+fn chose_device()-> Device{
     let mut s = String::new();
     let device = pcap::Device::list().unwrap();
     println!("Choose your device");
     device.iter().enumerate().for_each(|x|{
-        println!("Num: {}  Desc: {:?}  Address{:?} ", x.0  , x.1.desc, x.1.addresses)
+        if(x.1.flags.connection_status == pcap::ConnectionStatus::Connected){
+            println!("Num: {}  Desc: {:?}  Address{:?} ", x.0  , x.1.desc, x.1.addresses);
+        }
     });
 
     loop{
@@ -287,8 +269,7 @@ fn chose_device(){
             Ok(ok) => {
                 let i = s.trim().parse::<usize>().ok().unwrap();
                 if i <= device.len() -1 {
-                    start_sniffing(device[i].clone());
-                    break
+                    return device[i].clone();
                 } else {
                     println!("Please insert a valid number!");
                     s.clear();
@@ -315,16 +296,76 @@ fn create_file(p : PathBuf) -> File{
     file
 }
 
+fn save_on_file(file: &mut File, sum: &Summary){
+    //serde_json::to_writer(file, sum);
+    let mut ser1 = sum.to_json_map().unwrap();
+    println!("{:?}", ser1);
+    let s1 = ser1.replace(r"\","");
+    println!("{:?}", s1);
+    serde_json::to_writer(file, &s1);
+}
+
+fn wait_pause(){
+    let mut s = String::new();
+
+    loop{
+        //TAKE INPUT
+        stdin().read_line(&mut s).ok().expect("Failed to read line");
+        //CHECK INPUT AND START SNIFFING
+        match s.trim().parse::<String>() {
+            Ok(ok) => {
+                if s == "stop".to_string(){
+                    break
+                }
+            },
+            Err(e) => {
+                println!("Please insert a valid string!");
+                s.clear();
+                continue
+            }
+        }
+    }
+}
+
 fn main() {
     let args = cli::RustArgs::parse();
-    let x = match args.path {
+    let cv = Arc::new((Mutex::new(false), Condvar::new()));
+    let cv2 = Arc::clone(&cv);
+
+    let mut  file = match args.path {
         Some(p) => create_file(p),
         None => {
             let mut x = dirs::desktop_dir().unwrap();
-            x.push("try.txt");
+            x.push("try.json");
             create_file(x)
         }
     };
-    //println!("{:?}",args);
-    chose_device();
+
+    let duration = match args.duration{
+        Some(s) => s,
+        None => {
+            let mut x:usize = 0;
+            x
+        }
+    };
+
+    let filter = match args.filter{
+        Some(s) => s,
+        None => {
+            let mut x = "".to_string();
+            x
+        }
+    };
+
+    /*thread::Builder::new().spawn(move || {
+
+    }).unwrap();*/
+
+    let device = chose_device();
+    let sum = start_sniffing(device, &filter);
+    save_on_file(&mut file, &sum );
+
+
+    //wait_pause();
+
 }
