@@ -3,7 +3,7 @@ mod cli;
 use std::any::Any;
 use std::process;
 use std::borrow::Borrow;
-use pcap::{Device, Capture, PacketCodec, PacketHeader, Packet};
+use pcap::{Device, Capture, PacketCodec, PacketHeader, Packet, Address};
 use std::io::{stdin} ;
 use std::ops::Deref;
 use std::str::from_utf8;
@@ -75,7 +75,7 @@ fn ethernetDecode(ethernet_u8: &[u8]) -> VlanEthernetFrame{
         }
     };
 
-    println!("{:x?}", ethernet);
+    //println!("{:x?}", ethernet);
     ethernet
 }
 
@@ -83,7 +83,7 @@ fn ipv4Decode(ipv4_u8: &[u8], data: &[u8], src: &mut String, dst: &mut String, p
     let ipv4 = parse_ipv4_header(ipv4_u8).unwrap();
     *src = ipv4.1.source_addr.to_string();
     *dst = ipv4.1.dest_addr.to_string();
-    println!("{:?}",ipv4.1);
+    //println!("{:?}",ipv4.1);
 
     match ipv4.1.protocol {
         pktparse::ip::IPProtocol::TCP => {
@@ -92,7 +92,7 @@ fn ipv4Decode(ipv4_u8: &[u8], data: &[u8], src: &mut String, dst: &mut String, p
             *prot = "TCP".to_string();
             *srp = tcp.1.source_port;
             *dsp = tcp.1.dest_port;
-            println!("{:?}", tcp.1);
+            //println!("{:?}", tcp.1);
         },
         pktparse::ip::IPProtocol::UDP => {
             let udp_u8 = &data[(14 + (ipv4.1.ihl as usize) * 4)..];
@@ -100,19 +100,19 @@ fn ipv4Decode(ipv4_u8: &[u8], data: &[u8], src: &mut String, dst: &mut String, p
             *prot = "UDP".to_string();
             *srp = udp.1.source_port;
             *dsp = udp.1.dest_port;
-            println!("{:?}", udp.1);
+            // println!("{:?}", udp.1);
         }
 
         pktparse::ip::IPProtocol::IGMP =>{
             *prot = "IGMP".to_string();
-            println!("IGMP");
+            // println!("IGMP");
         },
 
         pktparse::ip::IPProtocol::ICMP => {
             let icmp_u8 = &data[(14 + (ipv4.1.ihl as usize) * 4)..];
             let icmp = parse_icmp_header(icmp_u8).unwrap();
             *prot = "ICMP".to_string();
-            println!("{:?}", icmp.1);
+            //println!("{:?}", icmp.1);
         },
 
         _=> println!("ERROR")
@@ -123,7 +123,7 @@ fn ipv6Decode(ipv6_u8: &[u8], data: &[u8], src: &mut String, dst: &mut String, p
     let ipv6 = parse_ipv6_header(ipv6_u8).unwrap();
     *src = ipv6.1.source_addr.to_string();
     *dst = ipv6.1.dest_addr.to_string();
-    println!("{:?}",ipv6.1);
+    //println!("{:?}",ipv6.1);
 
     match ipv6.1.next_header {
         pktparse::ip::IPProtocol::TCP => {
@@ -132,7 +132,7 @@ fn ipv6Decode(ipv6_u8: &[u8], data: &[u8], src: &mut String, dst: &mut String, p
             *prot = "TCP".to_string();
             *srp = tcp.1.source_port;
             *dsp = tcp.1.dest_port;
-            println!("{:?}", tcp.1);
+            // println!("{:?}", tcp.1);
         },
         pktparse::ip::IPProtocol::UDP => {
             let udp_u8 = &data[54..];
@@ -140,12 +140,12 @@ fn ipv6Decode(ipv6_u8: &[u8], data: &[u8], src: &mut String, dst: &mut String, p
             *prot = "UDP".to_string();
             *srp = udp.1.source_port;
             *dsp = udp.1.dest_port;
-            println!("{:?}", udp.1);
+            // println!("{:?}", udp.1);
         }
 
         pktparse::ip::IPProtocol::ICMP6 =>{
             *prot = "ICMP6".to_string();
-            println!("ICMP6");
+           // println!("ICMP6");
         },
         _=> println!("ERROR")
     }
@@ -208,7 +208,7 @@ fn try_toDecode(data : &[u8], sum: &mut Summary, newdate: String, i: u32){
          len: i,
      });
 
-    sum.iter().for_each(|x|println!("{:?}",x));
+    //sum.iter().for_each(|x|println!("{:?}",x));
 
 }
 
@@ -242,12 +242,14 @@ fn start_sniffing(device: Device, filter: &String) -> Summary{
                 //println!("{:?}", newdate);
                 try_toDecode(p.data, &mut sum, newdate, p.header.len);
             }
-            Err(e) => eprintln!("{:?}", e)
+            Err(e) => {
+                println!("");
+                eprintln!("{:?}", e);
+            }
         }
-        //i += 1;
-        //if i == 10 { break }
+       // i += 1;
+       // if i == 10 { break }
     }
-
     sum
 }
 
@@ -260,6 +262,11 @@ fn chose_device()-> Device{
             println!("Num: {}  Desc: {:?}  Address{:?} ", x.0  , x.1.desc, x.1.addresses);
         }
     });
+
+   //let x : Vec<Address> =  device.iter().map(|x| x.addresses).map(|x| x.).collect();
+    //println!("{:?}", x);
+    //let y : Address = x.iter().filter(|x|  x.addr.to_string() == "192.168.1.112".to_string()).collect();
+    //println!("{:?}",y);
 
     loop{
         //TAKE INPUT
@@ -307,20 +314,20 @@ fn save_on_file(file: &mut File, sum: &Summary){
 
 fn wait_pause(){
     let mut s = String::new();
-
+    println!("CI SONO");
     loop{
         //TAKE INPUT
         stdin().read_line(&mut s).ok().expect("Failed to read line");
         //CHECK INPUT AND START SNIFFING
-        match s.trim().parse::<String>() {
-            Ok(ok) => {
-                if s == "stop".to_string(){
-                    break
-                }
-            },
-            Err(e) => {
-                println!("Please insert a valid string!");
+        match s.trim().to_ascii_lowercase().as_str() {
+            "p" => {
                 s.clear();
+                println!("SIIII");
+                break
+            },
+            _ => {
+                s.clear();
+                println!("errore");
                 continue
             }
         }
@@ -329,14 +336,14 @@ fn wait_pause(){
 
 fn main() {
     let args = cli::RustArgs::parse();
-    let cv = Arc::new((Mutex::new(false), Condvar::new()));
-    let cv2 = Arc::clone(&cv);
+    let cv = Arc::new((Mutex::new(true), Condvar::new()));
+    let cv2 = cv.clone();
 
     let mut  file = match args.path {
         Some(p) => create_file(p),
         None => {
             let mut x = dirs::desktop_dir().unwrap();
-            x.push("try.json");
+            x.push("try.txt");
             create_file(x)
         }
     };
@@ -357,15 +364,27 @@ fn main() {
         }
     };
 
-    /*thread::Builder::new().spawn(move || {
-
-    }).unwrap();*/
 
     let device = chose_device();
-    let sum = start_sniffing(device, &filter);
-    save_on_file(&mut file, &sum );
+
+    let t1 = thread::Builder::new().name("t1".into()).spawn(move || {
+        let (lock, cvar) = &*cv2;
+        let mut sum = cvar.wait_while(lock.lock().unwrap(), start_sniffing(device, &filter)).unwrap();
+        //save_on_file(&mut file, &sum );
+    }).unwrap();
 
 
-    //wait_pause();
+    let t2 = thread::Builder::new().name("t2".into()).spawn(move || {
+        let (lock, cvar) = &*cv;
+        let mut pending = lock.lock().unwrap();
+        wait_pause();
+        *pending = false;
+        cvar.notify_all();
+    }).unwrap();
+
+    t1.join().unwrap();
+    t2.join().unwrap();
+
+
 
 }
