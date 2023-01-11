@@ -32,7 +32,9 @@ use serde_json_any_key::*;
 use regex::Regex;
 use std::thread;
 use std::thread::Builder;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, mpsc, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, Sender};
 
 
 #[derive(PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
@@ -208,19 +210,27 @@ fn try_toDecode(data : &[u8], sum: &mut Summary, newdate: String, i: u32){
          len: i,
      });
 
-    //sum.iter().for_each(|x|println!("{:?}",x));
+   // sum.iter().for_each(|x|println!("{:?}",x));
 
 }
 
-fn start_sniffing(device: Device, filter: &String) -> Summary{
+
+
+fn start_sniffing(device: Device, filter: &String, cv: Arc<(Mutex<bool>, Condvar)>) -> Summary{
     println!("{:?}", device);
     let mut cap = Capture::from_device(device)
         .unwrap()
         .promisc(true)
-        .timeout(2000)
+
+        //.timeout(2000)
+
         //.buffer_size(3)
+
         .open()
+
         .unwrap()
+
+
         ;
 
     let lt = cap.get_datalink();
@@ -233,8 +243,18 @@ fn start_sniffing(device: Device, filter: &String) -> Summary{
     cap.filter(filter, true).unwrap();
 
     let mut sum : Summary = HashMap::new();
-    let mut i = 0;
+    let (lock, cvar) = &*cv;
+    println!(" SNIFFING");
+    println!("PARTE SNIFFING PRESO LOCK");
     while let packet = cap.next_packet() {
+
+
+        let guard = cvar.wait_while(lock.lock().unwrap(), |pending| {
+            *pending
+        }).unwrap();
+
+        println!("packet");
+
         match packet {
             Ok(p) => {
                 let newdate = ts_toDate(p.header.ts.tv_sec as i64);
@@ -243,8 +263,8 @@ fn start_sniffing(device: Device, filter: &String) -> Summary{
                 try_toDecode(p.data, &mut sum, newdate, p.header.len);
             }
             Err(e) => {
-                println!("");
-                eprintln!("{:?}", e);
+                //println!("");
+                //eprintln!("{:?}", e);
             }
         }
        // i += 1;
@@ -252,6 +272,8 @@ fn start_sniffing(device: Device, filter: &String) -> Summary{
     }
     sum
 }
+
+
 
 fn chose_device()-> Device{
     let mut s = String::new();
@@ -312,9 +334,11 @@ fn save_on_file(file: &mut File, sum: &Summary){
     serde_json::to_writer(file, &s1);
 }
 
-fn wait_pause(){
+fn wait_pause(cv: Arc<(Mutex<bool>, Condvar)>){
     let mut s = String::new();
     println!("CI SONO");
+    let (lock,cvar ) = &*cv;
+
     loop{
         //TAKE INPUT
         stdin().read_line(&mut s).ok().expect("Failed to read line");
@@ -322,12 +346,33 @@ fn wait_pause(){
         match s.trim().to_ascii_lowercase().as_str() {
             "p" => {
                 s.clear();
-                println!("SIIII");
-                break
+                let mut started = lock.lock().unwrap();
+                println!("PRESO LOCK");
+                *started = true;
+                println!("USCITO DAL WHILE");
+                loop{
+                    println!("ASPETTO R");
+                    stdin().read_line(&mut s).ok().expect("Failed to read line");
+                    match s.trim().to_ascii_lowercase().as_str() {
+                        "r" => {
+                            s.clear();
+                            println!("RESUME");
+                            *started = false;
+                            cvar.notify_all();
+                            break
+                        }
+                        _ => {
+                            s.clear();
+                            println!("cmd non riconosciuto");
+                            continue
+                        }
+                    }
+
+                }
             },
             _ => {
                 s.clear();
-                println!("errore");
+                println!("cmd non riconosciuto");
                 continue
             }
         }
@@ -336,8 +381,10 @@ fn wait_pause(){
 
 fn main() {
     let args = cli::RustArgs::parse();
-    let cv = Arc::new((Mutex::new(true), Condvar::new()));
-    let cv2 = cv.clone();
+    let cv = Arc::new((Mutex::new(false), Condvar::new()));
+    let mut cv2 = cv.clone();
+    //let mut atm = Arc::new(AtomicBool::new(false));
+    //let atm2 = Arc::clone(&atm);
 
     let mut  file = match args.path {
         Some(p) => create_file(p),
@@ -368,23 +415,17 @@ fn main() {
     let device = chose_device();
 
     let t1 = thread::Builder::new().name("t1".into()).spawn(move || {
-        let (lock, cvar) = &*cv2;
-        let mut sum = cvar.wait_while(lock.lock().unwrap(), start_sniffing(device, &filter)).unwrap();
+         start_sniffing(device, &filter,cv2);
+        println!("Sono uscito");
         //save_on_file(&mut file, &sum );
     }).unwrap();
 
 
     let t2 = thread::Builder::new().name("t2".into()).spawn(move || {
-        let (lock, cvar) = &*cv;
-        let mut pending = lock.lock().unwrap();
-        wait_pause();
-        *pending = false;
-        cvar.notify_all();
+        wait_pause( cv);
     }).unwrap();
 
     t1.join().unwrap();
     t2.join().unwrap();
-
-
 
 }
