@@ -250,26 +250,22 @@ fn start_sniffing(device: Device, filter: &String, cv: Arc<(Mutex<bool>, Condvar
             *pending
         }).unwrap();
 
-
-        /*let guard2 = cvar1.wait_while(lock1.lock().unwrap(), |pending|{
-           /* if *pending{
-                save_on_file(file, &sum);
-            }*/
-            println!("SAVE ON FILE!");
-            *pending
-        }).unwrap();*/
+        println!("{:?}", guard);
 
         if(atm.load(Ordering::Relaxed)){
-            let mut started = lock1.lock().unwrap();
-            while  !*started {
-            started = cvar1.wait(started).unwrap();
+            if !*guard{
+                let mut started = lock1.lock().unwrap();
+                while  !*started {
+                    started = cvar1.wait(started).unwrap();
+                }
+                println!("AGGIORNO FILE!");
+                save_on_file(file, &sum);
+                println!("RITORNO SNIFFING");
+                atm.store(false, Ordering::Relaxed);
+                *started = false;
+                cvar1.notify_all();
             }
-            println!("AGGIORNO FILE!");
-            save_on_file(file, &sum);
-            println!("RITORNO SNIFFING");
-            atm.store(false, Ordering::Relaxed);
-            *started = false;
-            cvar1.notify_all();
+
         }
 
 
@@ -335,6 +331,7 @@ fn create_file(p : PathBuf) -> File{
 
 fn save_on_file(file: &mut File, sum: &Summary){
     //serde_json::to_writer(file, sum);
+
     let mut ser1 = sum.to_json_map().unwrap();
     println!("{:?}", ser1);
     let s1 = ser1.replace(r"\","");
@@ -402,7 +399,9 @@ fn main() {
     let atm2 = Arc::clone(&atm);
 
     let mut  file = match args.path {
-        Some(p) => create_file(p),
+        Some(p) => {
+            create_file(p)
+        },
         None => {
             let mut x = dirs::desktop_dir().unwrap();
             x.push("try.txt");
