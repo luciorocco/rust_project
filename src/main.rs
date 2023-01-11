@@ -1,7 +1,7 @@
 mod cli;
 
 use std::any::Any;
-use std::process;
+use std::{process, time};
 use std::borrow::Borrow;
 use pcap::{Device, Capture, PacketCodec, PacketHeader, Packet, Address};
 use std::io::{stdin} ;
@@ -35,6 +35,7 @@ use std::thread::Builder;
 use std::sync::{Arc, Condvar, mpsc, Mutex, MutexGuard};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
+use chrono::Duration;
 
 
 #[derive(PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
@@ -216,59 +217,71 @@ fn try_toDecode(data : &[u8], sum: &mut Summary, newdate: String, i: u32){
 
 
 
-fn start_sniffing(device: Device, filter: &String, cv: Arc<(Mutex<bool>, Condvar)>) -> Summary{
+fn start_sniffing(device: Device, filter: &String, cv: Arc<(Mutex<bool>, Condvar)>, cv1: Arc<(Mutex<bool>, Condvar)>, atm: &Arc<AtomicBool>, file: &mut File) -> Summary{
     println!("{:?}", device);
     let mut cap = Capture::from_device(device)
         .unwrap()
+
         .promisc(true)
 
-        //.timeout(2000)
-
-        //.buffer_size(3)
+        .timeout(1000)
 
         .open()
 
         .unwrap()
-
-
         ;
 
     let lt = cap.get_datalink();
     println!("{:?}", lt.0 );
     println!("{:?}", lt.get_name().unwrap());
-    println!("{:?}", lt.get_description().unwrap() );
-
-
+    println!("{:?}", lt.get_description().unwrap());
 
     cap.filter(filter, true).unwrap();
 
     let mut sum : Summary = HashMap::new();
     let (lock, cvar) = &*cv;
+    let (lock1, cvar1) = &*cv1;
     println!(" SNIFFING");
-    println!("PARTE SNIFFING PRESO LOCK");
     while let packet = cap.next_packet() {
 
 
         let guard = cvar.wait_while(lock.lock().unwrap(), |pending| {
+            println!("SNIFFING");
             *pending
         }).unwrap();
+
+
+        /*let guard2 = cvar1.wait_while(lock1.lock().unwrap(), |pending|{
+           /* if *pending{
+                save_on_file(file, &sum);
+            }*/
+            println!("SAVE ON FILE!");
+            *pending
+        }).unwrap();*/
+
+        if(atm.load(Ordering::Relaxed)){
+            let mut started = lock1.lock().unwrap();
+            while  !*started {
+            started = cvar1.wait(started).unwrap();
+            }
+            println!("AGGIORNO FILE!");
+            save_on_file(file, &sum);
+            println!("RITORNO SNIFFING");
+            atm.store(false, Ordering::Relaxed);
+            *started = false;
+            cvar1.notify_all();
+        }
+
 
         println!("packet");
 
         match packet {
             Ok(p) => {
                 let newdate = ts_toDate(p.header.ts.tv_sec as i64);
-                //println!("{:?}", packet.header.len);
-                //println!("{:?}", newdate);
                 try_toDecode(p.data, &mut sum, newdate, p.header.len);
             }
-            Err(e) => {
-                //println!("");
-                //eprintln!("{:?}", e);
-            }
+            Err(e) => {}
         }
-       // i += 1;
-       // if i == 10 { break }
     }
     sum
 }
@@ -284,11 +297,6 @@ fn chose_device()-> Device{
             println!("Num: {}  Desc: {:?}  Address{:?} ", x.0  , x.1.desc, x.1.addresses);
         }
     });
-
-   //let x : Vec<Address> =  device.iter().map(|x| x.addresses).map(|x| x.).collect();
-    //println!("{:?}", x);
-    //let y : Address = x.iter().filter(|x|  x.addr.to_string() == "192.168.1.112".to_string()).collect();
-    //println!("{:?}",y);
 
     loop{
         //TAKE INPUT
@@ -336,10 +344,10 @@ fn save_on_file(file: &mut File, sum: &Summary){
 
 fn wait_pause(cv: Arc<(Mutex<bool>, Condvar)>){
     let mut s = String::new();
-    println!("CI SONO");
     let (lock,cvar ) = &*cv;
 
     loop{
+        println!("Press P for pause or E for exit and save on file");
         //TAKE INPUT
         stdin().read_line(&mut s).ok().expect("Failed to read line");
         //CHECK INPUT AND START SNIFFING
@@ -347,16 +355,13 @@ fn wait_pause(cv: Arc<(Mutex<bool>, Condvar)>){
             "p" => {
                 s.clear();
                 let mut started = lock.lock().unwrap();
-                println!("PRESO LOCK");
                 *started = true;
-                println!("USCITO DAL WHILE");
                 loop{
-                    println!("ASPETTO R");
+                    println!("Press R for resume..");
                     stdin().read_line(&mut s).ok().expect("Failed to read line");
                     match s.trim().to_ascii_lowercase().as_str() {
                         "r" => {
                             s.clear();
-                            println!("RESUME");
                             *started = false;
                             cvar.notify_all();
                             break
@@ -370,6 +375,10 @@ fn wait_pause(cv: Arc<(Mutex<bool>, Condvar)>){
 
                 }
             },
+            "e" => {
+                println!("EXIT");
+                process::exit(1);
+            }
             _ => {
                 s.clear();
                 println!("cmd non riconosciuto");
@@ -379,12 +388,18 @@ fn wait_pause(cv: Arc<(Mutex<bool>, Condvar)>){
     }
 }
 
+
+
 fn main() {
     let args = cli::RustArgs::parse();
+    //PAUSE
     let cv = Arc::new((Mutex::new(false), Condvar::new()));
     let mut cv2 = cv.clone();
-    //let mut atm = Arc::new(AtomicBool::new(false));
-    //let atm2 = Arc::clone(&atm);
+    //DURATION
+    let cv3 = Arc::new((Mutex::new(false), Condvar::new()));
+    let mut cv4 = cv3.clone();
+    let mut atm = Arc::new(AtomicBool::new(false));
+    let atm2 = Arc::clone(&atm);
 
     let mut  file = match args.path {
         Some(p) => create_file(p),
@@ -396,9 +411,9 @@ fn main() {
     };
 
     let duration = match args.duration{
-        Some(s) => s,
+        Some(s) => s as u64,
         None => {
-            let mut x:usize = 0;
+            let mut x : u64 = 0;
             x
         }
     };
@@ -415,7 +430,7 @@ fn main() {
     let device = chose_device();
 
     let t1 = thread::Builder::new().name("t1".into()).spawn(move || {
-         start_sniffing(device, &filter,cv2);
+         start_sniffing(device, &filter,cv2, cv4, &atm2,  &mut file);
         println!("Sono uscito");
         //save_on_file(&mut file, &sum );
     }).unwrap();
@@ -425,7 +440,25 @@ fn main() {
         wait_pause( cv);
     }).unwrap();
 
-    t1.join().unwrap();
-    t2.join().unwrap();
+
+    let t3 = thread::Builder::new().name("t3".into()).spawn(move || loop {
+        let (lock,cvar ) = &*cv3;
+        let mut started = lock.lock().unwrap();
+        thread::sleep(time::Duration::from_secs(/*duration*/ 10));
+        println!("ATTESA FINITA");
+        atm.store(true,Ordering::Relaxed);
+        println!("TIMER FINITO CAMBIO ATM {:?}",atm );
+        *started = true;
+        cvar.notify_all();
+        while *started {
+            started = cvar.wait(started).unwrap();
+        }
+        println!("FINITOOOO");
+    }).unwrap();
+
+        t1.join().unwrap();
+        t2.join().unwrap();
+        t3.join().unwrap();
+
 
 }
