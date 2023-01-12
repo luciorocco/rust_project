@@ -25,6 +25,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::ptr::null;
 use std::fs::{File, OpenOptions};
+use std::future::pending;
 use dirs::desktop_dir;
 use serde::{Serialize, Deserialize};
 use serde_json::Result;
@@ -217,7 +218,7 @@ fn try_toDecode(data : &[u8], sum: &mut Summary, newdate: String, i: u32){
 
 
 
-fn start_sniffing(device: Device, filter: &String, cv: Arc<(Mutex<bool>, Condvar)>, cv1: Arc<(Mutex<bool>, Condvar)>, atm: &Arc<AtomicBool>, file: &mut File) -> Summary{
+fn start_sniffing(device: Device, filter: &String, cv: Arc<(Mutex<bool>, Condvar)>, cv1: Arc<(Mutex<bool>, Condvar)>, atm: &Arc<AtomicBool>, file: &mut PathBuf, atm2: &Arc<AtomicBool>) -> Summary{
     println!("{:?}", device);
     let mut cap = Capture::from_device(device)
         .unwrap()
@@ -232,25 +233,36 @@ fn start_sniffing(device: Device, filter: &String, cv: Arc<(Mutex<bool>, Condvar
         ;
 
     let lt = cap.get_datalink();
-    println!("{:?}", lt.0 );
-    println!("{:?}", lt.get_name().unwrap());
-    println!("{:?}", lt.get_description().unwrap());
+    //println!("{:?}", lt.0 );
+    //println!("{:?}", lt.get_name().unwrap());
+    //println!("{:?}", lt.get_description().unwrap());
 
     cap.filter(filter, true).unwrap();
 
     let mut sum : Summary = HashMap::new();
     let (lock, cvar) = &*cv;
     let (lock1, cvar1) = &*cv1;
+
     println!(" SNIFFING");
+
     while let packet = cap.next_packet() {
+
+        if(atm2.load(Ordering::Relaxed)){
+            let mut started = lock.lock().unwrap();
+            while *started {
+                started = cvar.wait(started).unwrap();
+            }
+            save_on_file(file, &sum);
+            *started = true;
+            cvar.notify_all();
+        }
+
 
 
         let guard = cvar.wait_while(lock.lock().unwrap(), |pending| {
-            println!("SNIFFING");
-            *pending
+                *pending
         }).unwrap();
 
-        println!("{:?}", guard);
 
         if(atm.load(Ordering::Relaxed)){
             if !*guard{
@@ -265,11 +277,10 @@ fn start_sniffing(device: Device, filter: &String, cv: Arc<(Mutex<bool>, Condvar
                 *started = false;
                 cvar1.notify_all();
             }
-
         }
 
 
-        println!("packet");
+
 
         match packet {
             Ok(p) => {
@@ -329,17 +340,23 @@ fn create_file(p : PathBuf) -> File{
     file
 }
 
-fn save_on_file(file: &mut File, sum: &Summary){
+fn save_on_file(file: &mut PathBuf, sum: &Summary){
     //serde_json::to_writer(file, sum);
 
+    let mut file_op= OpenOptions::new()
+        .write(true)
+        .append(true)
+        .open(file)
+        .unwrap();
     let mut ser1 = sum.to_json_map().unwrap();
-    println!("{:?}", ser1);
+    //println!("{:?}", ser1);
     let s1 = ser1.replace(r"\","");
-    println!("{:?}", s1);
-    serde_json::to_writer(file, &s1);
+    //println!("{:?}", s1);
+    serde_json::to_writer(file_op, &s1);
+    println!("REPORT GENERATO");
 }
 
-fn wait_pause(cv: Arc<(Mutex<bool>, Condvar)>){
+fn wait_pause(cv: Arc<(Mutex<bool>, Condvar)>, atm: &Arc<AtomicBool>){
     let mut s = String::new();
     let (lock,cvar ) = &*cv;
 
@@ -362,7 +379,7 @@ fn wait_pause(cv: Arc<(Mutex<bool>, Condvar)>){
                             *started = false;
                             cvar.notify_all();
                             break
-                        }
+                        },
                         _ => {
                             s.clear();
                             println!("cmd non riconosciuto");
@@ -373,8 +390,13 @@ fn wait_pause(cv: Arc<(Mutex<bool>, Condvar)>){
                 }
             },
             "e" => {
+                atm.store(true, Ordering::Relaxed);
+                let mut started = lock.lock().unwrap();
+                while !*started {
+                    started = cvar.wait(started).unwrap();
+                }
                 println!("EXIT");
-                process::exit(1);
+                process::exit(0);
             }
             _ => {
                 s.clear();
@@ -392,6 +414,9 @@ fn main() {
     //PAUSE
     let cv = Arc::new((Mutex::new(false), Condvar::new()));
     let mut cv2 = cv.clone();
+    //EXIT
+    let mut atm3 = Arc::new(AtomicBool::new(false));
+    let atm4 = Arc::clone(&atm3);
     //DURATION
     let cv3 = Arc::new((Mutex::new(false), Condvar::new()));
     let mut cv4 = cv3.clone();
@@ -400,12 +425,14 @@ fn main() {
 
     let mut  file = match args.path {
         Some(p) => {
-            create_file(p)
+            create_file(p.clone());
+            p
         },
         None => {
             let mut x = dirs::desktop_dir().unwrap();
             x.push("try.txt");
-            create_file(x)
+            create_file(x.clone());
+            x
         }
     };
 
@@ -429,14 +456,13 @@ fn main() {
     let device = chose_device();
 
     let t1 = thread::Builder::new().name("t1".into()).spawn(move || {
-         start_sniffing(device, &filter,cv2, cv4, &atm2,  &mut file);
+         start_sniffing(device, &filter,cv2, cv4, &atm2,  &mut file, &atm4);
         println!("Sono uscito");
-        //save_on_file(&mut file, &sum );
     }).unwrap();
 
 
     let t2 = thread::Builder::new().name("t2".into()).spawn(move || {
-        wait_pause( cv);
+        wait_pause(cv, &atm3);
     }).unwrap();
 
 
