@@ -466,24 +466,28 @@ fn main() {
     }).unwrap();
 
 
-    let t3 = thread::Builder::new().name("t3".into()).spawn(move || loop {
-        let (lock,cvar ) = &*cv3;
-        let mut started = lock.lock().unwrap();
-        thread::sleep(time::Duration::from_secs(/*duration*/ 10));
-        println!("ATTESA FINITA");
-        atm.store(true,Ordering::Relaxed);
-        println!("TIMER FINITO CAMBIO ATM {:?}",atm );
-        *started = true;
-        cvar.notify_all();
-        while *started {
-            started = cvar.wait(started).unwrap();
-        }
-        println!("FINITOOOO");
-    }).unwrap();
+    if duration > 0{
+        let t3 = thread::Builder::new().name("t3".into()).spawn(move || loop {
+            let (lock,cvar ) = &*cv3;
+            let mut started = lock.lock().unwrap();
+            thread::sleep(time::Duration::from_secs(duration));
+            println!("ATTESA FINITA");
+            atm.store(true,Ordering::Relaxed);
+            println!("TIMER FINITO CAMBIO ATM {:?}",atm );
+            *started = true;
+            cvar.notify_all();
+            while *started {
+                started = cvar.wait(started).unwrap();
+            }
+            println!("FINITOOOO");
+        }).unwrap();
+
+        t3.join().unwrap();
+    }
+
 
         t1.join().unwrap();
         t2.join().unwrap();
-        t3.join().unwrap();
 
 
 }
