@@ -35,10 +35,11 @@ use std::thread;
 use std::thread::Builder;
 use std::sync::{Arc, Condvar, mpsc, Mutex, MutexGuard};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, Receiver, Sender, SyncSender};
+use std::sync::mpsc::{channel, Receiver, Sender, SyncSender, TryRecvError};
 use chrono::Duration;
 use pcap_parser::nom::Err::Error;
 use serde::de::Unexpected::Option;
+use std::io::prelude::*;
 
 
 #[derive(PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
@@ -241,7 +242,7 @@ fn try_toDecode(data : &[u8], sum: &mut Summary, newdate: String, i: u32){
 fn parse_packet(mut sum: &mut Summary, cv1: &Arc<(Mutex<bool>, Condvar)>, atm: &Arc<AtomicBool>, file: &mut PathBuf, packet: &PacketOwned){
 
     let (lock1, cvar1) = &**cv1;
-
+    println!("k");
 
     if(atm.load(Ordering::Relaxed)){
         let mut started = lock1.lock().unwrap();
@@ -250,11 +251,12 @@ fn parse_packet(mut sum: &mut Summary, cv1: &Arc<(Mutex<bool>, Condvar)>, atm: &
         }
         println!("AGGIORNO FILE!");
         save_on_file(file, &sum);
-        println!("RITORNO SNIFFING");
         atm.store(false, Ordering::Relaxed);
         *started = false;
         cvar1.notify_all();
     }
+
+
 
     let newdate = ts_toDate(packet.header.ts.tv_sec as i64);
     try_toDecode(&packet.data, &mut sum, newdate, packet.header.len);
@@ -268,48 +270,29 @@ fn start_sniffing(atm2: &Arc<AtomicBool>, started: &mut MutexGuard<bool>, cap: &
     //println!("{:?}", lt.0 );
     //println!("{:?}", lt.get_name().unwrap());
     //println!("{:?}", lt.get_description().unwrap());
-    let mut i = 0;
-    let mut n = 0;
-    let mut c = 0;
     cap.filter(filter, true).unwrap();
     //let (lock, cvar) = &**cv;
     println!(" SNIFFING");
     while let packet = cap.next_packet() {
-        //println!("{:?}", packet);
-        n += 1;
-
 
         if (atm2.load(Ordering::Relaxed)) {
             **started = false;
             cv.notify_all();
             break
         }
-            c += 1 ;
-            if i == 150 {
-                println!("CIAO N={}, i={}, c={}", n, i, c);
-                i = 0;
+
+        match packet {
+            Ok(p) => {
+                let pa = Codec.decode(p);
+                tx.send(pa);
             }
-
-            /*if(atm2.load(Ordering::Relaxed)){
-            let mut started = lock.lock().unwrap();
-
-            while *started {
-                started = cvar.wait(started).unwrap();
-            }
-            save_on_file(file, &sum);
-            *started = true;
-            cvar.notify_all();
-        }*/
-
-            match packet {
-                Ok(p) => {
-                    let pa = Codec.decode(p);
-                    tx.send(pa);
+            Err(e) => {
+                match e{
+                    _ => {println!("UNKNOW ERROR {:?}", e)}
                 }
-                Err(e) => {}
             }
-            i += 1;
         }
+    }
 
 }
 
@@ -319,8 +302,6 @@ fn capturedevice(device: Device) -> Capture<Active>{
         .unwrap()
 
         .promisc(true)
-
-        .snaplen(256)
 
         .immediate_mode(true)
 
@@ -377,26 +358,31 @@ fn create_file(p : PathBuf) -> File{
 }
 
 fn save_on_file(file: &mut PathBuf, sum: &Summary){
-    //serde_json::to_writer(file, sum);
-
     let mut file_op= OpenOptions::new()
         .write(true)
         .append(true)
-        .open(file)
+        .open(&file)
         .unwrap();
-    let mut ser1 = sum.to_json_map().unwrap();
-    //println!("{:?}", ser1);
-    let s1 = ser1.replace(r"\","");
-    //println!("{:?}", s1);
-    serde_json::to_writer(file_op, &s1);
-    println!("REPORT GENERATO");
+
+    writeln!(&file_op, "-------------------------------------------------------------------------------------").unwrap();
+
+    sum.iter().for_each(|x|{
+        if x.0.type_eth.clone() == "ARP".to_string() {
+            writeln!(&file_op, " Type Ethernet : {} \n Source : {} -> Destination : {}, Operation : {}  ",
+                     x.0.type_eth, x.0.source_address, x.0.destination_address, x.0.operation).unwrap();
+        }else{
+            writeln!(&file_op, " Type Ethernet : {} \n Source : {}_{} -> Destination : {}_{}, Protocol : {}  ",
+                     x.0.type_eth, x.0.source_address, x.0.source_port, x.0.destination_address, x.0.dest_port, x.0.protocol).unwrap();
+        }
+    });
+    println!("GENERATED REPORT...");
 }
 
-fn wait_pause(cv: Arc<(Mutex<bool>, Condvar)>, atm: &Arc<AtomicBool>){
+fn wait_pause(cv: Arc<(Mutex<bool>, Condvar)>, atm: &Arc<AtomicBool>, ext: &Arc<AtomicBool>){
     let mut s = String::new();
     let (lock,cvar ) = &*cv;
 
-    loop{
+    'outer: loop{
         println!("Press P for pause or E for exit and save on file");
         //TAKE INPUT
         stdin().read_line(&mut s).ok().expect("Failed to read line");
@@ -408,8 +394,8 @@ fn wait_pause(cv: Arc<(Mutex<bool>, Condvar)>, atm: &Arc<AtomicBool>){
                 let mut guard = cvar.wait_while(lock.lock().unwrap(),|pending|{
                     *pending
                 }).unwrap();
-                loop{
-                    println!("Press R for resume..");
+                'inner : loop{
+                    println!("Press R for resume or E to exit..");
                     stdin().read_line(&mut s).ok().expect("Failed to read line");
                     match s.trim().to_ascii_lowercase().as_str() {
                         "r" => {
@@ -417,11 +403,15 @@ fn wait_pause(cv: Arc<(Mutex<bool>, Condvar)>, atm: &Arc<AtomicBool>){
                             atm.store(false, Ordering::Relaxed);
                             *guard = true;
                             cvar.notify_all();
-                            break
+                            break 'inner
                         },
+                        "e" => {
+                            ext.store(true, Ordering::Relaxed);
+                            break 'outer
+                        }
                         _ => {
                             s.clear();
-                            println!("cmd non riconosciuto");
+                            println!("Command Not Found...");
                             continue
                         }
                     }
@@ -429,17 +419,18 @@ fn wait_pause(cv: Arc<(Mutex<bool>, Condvar)>, atm: &Arc<AtomicBool>){
                 }
             },
             "e" => {
-                /*atm.store(true, Ordering::Relaxed);
-                let mut started = lock.lock().unwrap();
-                while !*started {
-                    started = cvar.wait(started).unwrap();
-                }*/
-                println!("EXIT");
-                process::exit(0);
+                ext.store(true, Ordering::Relaxed);
+                atm.store(true, Ordering::Relaxed);
+                let mut guard = cvar.wait_while(lock.lock().unwrap(),|pending|{
+                    *pending
+                }).unwrap();
+                *guard = true;
+                cvar.notify_all();
+                break 'outer
             }
             _ => {
                 s.clear();
-                println!("cmd non riconosciuto");
+                println!("Command Not Found...");
                 continue
             }
         }
@@ -453,15 +444,20 @@ fn main() {
     //PAUSE
     let cv = Arc::new((Mutex::new(true), Condvar::new()));
     let mut cv2 = cv.clone();
-    //EXIT
-    let mut atm3 = Arc::new(AtomicBool::new(false));
+    let  atm3 = Arc::new(AtomicBool::new(false));
     let atm4 = Arc::clone(&atm3);
     //DURATION
     let cv3 = Arc::new((Mutex::new(false), Condvar::new()));
     let mut cv4 = cv3.clone();
-    let mut atm = Arc::new(AtomicBool::new(false));
+    let atm = Arc::new(AtomicBool::new(false));
     let atm2 = Arc::clone(&atm);
+    //EXIT
+    let ext_atm = Arc::new(AtomicBool::new(false));
+    let ext_atm1 = Arc::clone(&ext_atm);
+    let ext_atm2 = Arc::clone(&ext_atm);
+    let ext_atm3 = Arc::clone(&ext_atm);
 
+    //FOR PARSE PACKET
     let (tx, rx) : (Sender<PacketOwned>, Receiver<PacketOwned>) = mpsc::channel();
 
     let mut sum : Summary = HashMap::new();
@@ -483,7 +479,7 @@ fn main() {
     let duration = match args.duration{
         Some(s) => s as u64,
         None => {
-            let mut x : u64 = 0;
+            let mut x : u64 = 10;
             x
         }
     };
@@ -496,53 +492,73 @@ fn main() {
         }
     };
 
-
     let device = chose_device();
     let mut capture_device = capturedevice(device);
 
     let t1 = thread::Builder::new().name("t1".into()).spawn(move || loop {
-        let(lock, cvar) = &*cv2;
-        let mut started = lock.lock().unwrap();
-        println!("{:?}", started);
-        while !*started {
-            started = cvar.wait(started).unwrap();
+        if !ext_atm.load(Ordering::Relaxed){
+            let(lock, cvar) = &*cv2;
+            let mut started = lock.lock().unwrap();
+            while !*started {
+                started = cvar.wait(started).unwrap();
+            }
+            println!("START SNIFFING");
+            start_sniffing(&atm4, &mut started, &mut capture_device, &cvar, &tx ,&filter);
+        }else {
+            println!("FINISH SNIFFING");
+            break;
         }
-        println!("START SNIFFING");
-        start_sniffing(&atm4,&mut started, &mut capture_device, &cvar, &tx ,&filter);
-
     }).unwrap();
 
 
     let t2 = thread::Builder::new().name("t2".into()).spawn(move || {
-        wait_pause(cv, &atm3);
+        wait_pause(cv, &atm3, &ext_atm1);
+        println!("FINISH WAIT COMMAND");
     }).unwrap();
 
 
     let t4 = thread::Builder::new().name("t4".into()).spawn(move || loop{
-        match rx.recv(){
-            Ok(packet) => {parse_packet( &mut sum ,&cv4, &atm2,  &mut file,  &packet)},
-            Err(e) => {println!("ROTTO")}
+        if(!ext_atm3.load(Ordering::Relaxed)){
+            match rx.try_recv(){
+                Ok(packet) => {parse_packet( &mut sum ,&cv4, &atm2,  &mut file,  &packet)},
+                Err(TryRecvError::Disconnected) => {println!("DISCONNESSO")},
+                Err(TryRecvError::Empty) => {}
+            }
+        }else {
+            println!("UPDATE FILE EXIT!");
+            save_on_file(&mut file, &sum);
+            println!("FINISH PARSE PACKET AND UPDATE FILE");
+            break
         }
+
     }).unwrap();
 
-    if duration > 0{
+    if duration > 0 {
         let t3 = thread::Builder::new().name("t3".into()).spawn(move || loop {
-            let (lock,cvar ) = &*cv3;
-            let mut started = lock.lock().unwrap();
-            thread::sleep(time::Duration::from_secs(duration));
-            println!("ATTESA FINITA");
-            atm.store(true,Ordering::Relaxed);
-            println!("TIMER FINITO CAMBIO ATM {:?}",atm );
-            *started = true;
-            cvar.notify_all();
-            while *started {
-                started = cvar.wait(started).unwrap();
+            if !ext_atm2.load(Ordering::Relaxed){
+                let (lock,cvar ) = &*cv3;
+                let mut started = lock.lock().unwrap();
+                thread::sleep(time::Duration::from_secs(duration));
+                if ext_atm2.load(Ordering::Relaxed){println!("FINISH DURATION ");break};
+                println!("FINISH WAIT DURATION...");
+                atm.store(true,Ordering::Relaxed);
+                *started = true;
+                cvar.notify_all();
+                while *started {
+                    started = cvar.wait(started).unwrap();
+                }
+            }else {
+                println!("FINISH DURATION");
+                break;
             }
-            println!("FINITOOOO");
+
         }).unwrap();
         t3.join().unwrap();
     }
     t1.join().unwrap();
     t2.join().unwrap();
     t4.join().unwrap();
+
+    println!("EXIT");
+
 }
