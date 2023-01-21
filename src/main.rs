@@ -1,7 +1,7 @@
 mod cli;
 
 use std::any::Any;
-use std::{process, result, time};
+use std::{fs, process, result, time};
 use std::borrow::{Borrow, BorrowMut};
 use pcap::{Device, Capture, PacketCodec, PacketHeader, Packet, Address, Active};
 use std::io::{stdin} ;
@@ -22,9 +22,9 @@ use pktparse::icmp::parse_icmp_header;
 use clap::Parser;
 use pcap_parser::nom::IResult;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::ptr::null;
-use std::fs::{File, OpenOptions};
+use std::fs::{create_dir_all, File, OpenOptions};
 use std::future::pending;
 use dirs::desktop_dir;
 use serde::{Serialize, Deserialize};
@@ -168,18 +168,18 @@ impl PacketCodec for Codec {
     }
 }
 
-fn ts_toDate(ts:i64)-> String{
-    let naive = NaiveDateTime::from_timestamp_opt(ts,0).unwrap();
+fn ts_toDate(ts_sec: i64, ts_usec: u32) -> String{
+    let naive = NaiveDateTime::from_timestamp_opt(ts_sec,ts_usec*1000).unwrap();
     let _datetime: DateTime<Utc> = DateTime::from_utc(naive,Utc);
     let datetime: DateTime<Local> = DateTime::from(_datetime);
-    let newdate = datetime.format("%Y-%m-%d %H:%M:%S").to_string();
+    let newdate = datetime.format("%Y-%m-%d %H:%M:%S%.6f").to_string();
     newdate
 }
 
 fn ethernetDecode(ethernet_u8: &[u8]) -> VlanEthernetFrame{
     let ethernet = match parse_vlan_ethernet_frame(ethernet_u8) {
         Ok(x) => {x.1}
-        Err(e) => {
+        Err(_) => {
             println!("ERRORE");
             process::exit(0);
         }
@@ -366,9 +366,7 @@ fn parse_packet(mut sum: &mut Summary, cv1: &Arc<(Mutex<bool>, Condvar)>, atm: &
         cvar1.notify_all();
     }
 
-
-
-    let newdate = ts_toDate(packet.header.ts.tv_sec as i64);
+    let newdate = ts_toDate(packet.header.ts.tv_sec as i64, packet.header.ts.tv_usec as u32);
     try_toDecode(&packet.data, &mut sum, newdate, packet.header.len);
 }
 
@@ -377,11 +375,7 @@ fn parse_packet(mut sum: &mut Summary, cv1: &Arc<(Mutex<bool>, Condvar)>, atm: &
 fn start_sniffing(atm2: &Arc<AtomicBool>, started: &mut MutexGuard<bool>, cap: &mut Capture<Active>, cv: &&Condvar, tx: &Sender<PacketOwned>, filter: &String){
 
     let lt = cap.get_datalink();
-    //println!("{:?}", lt.0 );
-    //println!("{:?}", lt.get_name().unwrap());
-    //println!("{:?}", lt.get_description().unwrap());
     cap.filter(filter, true).unwrap();
-    //let (lock, cvar) = &**cv;
     println!(" SNIFFING");
     while let packet = cap.next_packet() {
 
@@ -398,7 +392,10 @@ fn start_sniffing(atm2: &Arc<AtomicBool>, started: &mut MutexGuard<bool>, cap: &
             }
             Err(e) => {
                 match e{
-                    _ => {}
+                    pcap::Error::TimeoutExpired => {},
+                    pcap::Error::InsufficientMemory => {},
+                    pcap::Error::BufferOverflow => {},
+                    _ => {println!("{:?}", e)}
                 }
             }
         }
@@ -607,9 +604,20 @@ fn main() {
         },
         None => {
             let mut x = dirs::desktop_dir().unwrap();
-            x.push("sniff.txt");
-            create_file(x.clone());
-            x
+
+            let mut string_path= x.to_str().unwrap().to_string();
+            string_path.push_str("/sniffing");
+
+            if !Path::exists(Path::new(&string_path)){
+                println!("Create New Dir");
+                create_dir_all(&string_path);
+            }
+            let mut p = PathBuf::from(&string_path);
+            let date = chrono::offset::Local::now();
+            let newdate = date.format("%Y-%m-%d_%H-%M-%S").to_string();
+            p.push(format!("Sniffing{}.txt", newdate));
+            create_file(p.clone());
+            p
         }
     };
 
@@ -681,14 +689,13 @@ fn main() {
                     let (lock,cvar ) = &*cv3;
                     let mut started = lock.lock().unwrap();
                     if ext_atm2.load(Ordering::Relaxed){println!("FINISH DURATION ");break};
-                    println!("FINISH WAIT DURATION...");
+                    println!("FINISH WAIT DURATION GO TO UPDATE FILE");
                     atm.store(true,Ordering::Relaxed);
                     *started = true;
                     cvar.notify_all();
                     while *started {
                         started = cvar.wait(started).unwrap();
                     }
-                    println!("PROVAAAA");
                 }
                 Err(RecvTimeoutError::Disconnected) => {
                     println!("DISCONNECTED");
