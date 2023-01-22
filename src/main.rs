@@ -3,7 +3,7 @@ mod cli;
 use std::any::Any;
 use std::{fs, process, result, time};
 use std::borrow::{Borrow, BorrowMut};
-use pcap::{Device, Capture, PacketCodec, PacketHeader, Packet, Address, Active};
+use pcap::{Device, Capture, PacketCodec, PacketHeader, Packet, Address, Active, DeviceFlags};
 use std::io::{stdin} ;
 use std::ops::Deref;
 use std::str::from_utf8;
@@ -41,6 +41,7 @@ use pcap_parser::nom::Err::Error;
 use serde::de::Unexpected::Option;
 use std::io::prelude::*;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
+use std::rc::Rc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AppProtocol {
@@ -126,7 +127,7 @@ pub fn from_port_to_application_protocol(port: u16) -> AppProtocol {
     }
 }
 
-#[derive(PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Hash, Debug, Serialize, Deserialize,Clone )]
 pub struct k{
     pub type_eth : String,
     pub source_address : String,
@@ -137,13 +138,12 @@ pub struct k{
     pub protocol: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct summary{
     pub ts_i: String,
     pub ts_f: String,
     pub len: u32,
 }
-
 
 type Summary = HashMap<k, summary>;
 
@@ -349,23 +349,7 @@ fn try_toDecode(data : &[u8], sum: &mut Summary, newdate: String, i: u32){
 }
 
 
-fn parse_packet(mut sum: &mut Summary, cv1: &Arc<(Mutex<bool>, Condvar)>, atm: &Arc<AtomicBool>, file: &mut PathBuf, packet: &PacketOwned){
-
-    let (lock1, cvar1) = &**cv1;
-    //println!("k");
-
-    if(atm.load(Ordering::Relaxed)){
-        let mut started = lock1.lock().unwrap();
-        while  !*started {
-            started = cvar1.wait(started).unwrap();
-        }
-        println!("AGGIORNO FILE!");
-        save_on_file(file, &sum);
-        atm.store(false, Ordering::Relaxed);
-        *started = false;
-        cvar1.notify_all();
-    }
-
+fn parse_packet(mut sum: &mut Summary, packet: &PacketOwned){
     let newdate = ts_toDate(packet.header.ts.tv_sec as i64, packet.header.ts.tv_usec as u32);
     try_toDecode(&packet.data, &mut sum, newdate, packet.header.len);
 }
@@ -375,15 +359,24 @@ fn parse_packet(mut sum: &mut Summary, cv1: &Arc<(Mutex<bool>, Condvar)>, atm: &
 fn start_sniffing(atm2: &Arc<AtomicBool>, started: &mut MutexGuard<bool>, cap: &mut Capture<Active>, cv: &&Condvar, tx: &Sender<PacketOwned>, filter: &String){
 
     let lt = cap.get_datalink();
-    cap.filter(filter, true).unwrap();
-    println!(" SNIFFING");
+
+    match cap.filter(filter, true){
+        Ok(_) => {println!("APPLIED FILTER")},
+        Err(e) => {
+            println!("WRONG USAGE OF FILTER! PLEASE INSERT A VALID FILTER");
+            process::exit(1);
+        }
+    }
+    println!("");
+    println!("--------------------------SNIFFING------------------------------");
     while let packet = cap.next_packet() {
 
-        if (atm2.load(Ordering::Relaxed)) {
+        if atm2.load(Ordering::Relaxed) {
             **started = false;
             cv.notify_all();
             break
         }
+
 
         match packet {
             Ok(p) => {
@@ -391,12 +384,7 @@ fn start_sniffing(atm2: &Arc<AtomicBool>, started: &mut MutexGuard<bool>, cap: &
                 tx.send(pa);
             }
             Err(e) => {
-                match e{
-                    pcap::Error::TimeoutExpired => {},
-                    pcap::Error::InsufficientMemory => {},
-                    pcap::Error::BufferOverflow => {},
-                    _ => {println!("{:?}", e)}
-                }
+                continue
             }
         }
     }
@@ -404,25 +392,40 @@ fn start_sniffing(atm2: &Arc<AtomicBool>, started: &mut MutexGuard<bool>, cap: &
 }
 
 fn capturedevice(device: Device) -> Capture<Active>{
-    println!("{:?}", device);
+    println!("{:?}", device.addresses.first().unwrap());
     let mut cap = Capture::from_device(device)
-        .unwrap()
+        .expect("Capture initialization error\n\r")
 
         .promisc(true)
 
         .immediate_mode(true)
 
         .open()
-
-        .unwrap()
         ;
-    cap
+
+    let cap1 = match cap {
+        Ok(x) => x,
+        Err(e) => {
+            println!("{:?}",e);
+            process::exit(1);
+        }
+    };
+    match cap1.get_datalink(){
+        pcap::Linktype::ETHERNET =>{},
+        _ => {
+            println!("Please select a ethernet Linktypr");
+            process::exit(1);
+
+        }
+    }
+    cap1
 }
 
 fn chose_device()-> Device{
     let mut s = String::new();
     let device = pcap::Device::list().unwrap();
-    println!("Choose your device");
+    println!("");
+    println!("Please select your device by choosing among the following numbers:");
     device.iter().enumerate().for_each(|x|{
         if(x.1.flags.connection_status == pcap::ConnectionStatus::Connected){
             match x.1.addresses.first() {
@@ -469,33 +472,38 @@ fn create_file(p : PathBuf) -> File{
 }
 
 fn save_on_file(file: &mut PathBuf, sum: &Summary){
-    let mut file_op= OpenOptions::new()
-        .write(true)
-        .append(true)
-        .open(&file)
-        .unwrap();
+    if sum.len() != 0{
+        let mut file_op= OpenOptions::new()
+            .write(true)
+            .append(true)
+            .open(&file)
+            .unwrap();
 
-    writeln!(&file_op, "--------------------------------------------------------------------------------------------------------------------------------------------------------------").unwrap();
-    writeln!(&file_op, "--------------------------------------------------------------------------------------------------------------------------------------------------------------").unwrap();
+        writeln!(&file_op, "--------------------------------------------------------------------------------------------------------------------------------------------------------------").unwrap();
+        writeln!(&file_op, "--------------------------------------------------------------------------------------------------------------------------------------------------------------").unwrap();
 
-    sum.iter().for_each(|x|{
-        writeln!(&file_op,"\n");
+        sum.iter().for_each(|x|{
+            writeln!(&file_op,"\n");
 
-        if x.0.type_eth.clone() == "ARP".to_string() {
-            writeln!(&file_op, " Type Ethernet : {}, Initial Time Stamp : {}, Final Time Stamp : {}, Total Lenght :{} \n Source : {} -> Destination : {}, Operation : {}  ",
-                     x.0.type_eth, x.1.ts_i, x.1.ts_f, x.1.len, x.0.source_address, x.0.destination_address, x.0.operation).unwrap();
-        }else{
-            let mut ap_protocol= match from_port_to_application_protocol(x.0.dest_port) {
-                x if x != AppProtocol::Other =>{x},
-                _ => {
-                    from_port_to_application_protocol(x.0.source_port)
-                }
-            };
-            writeln!(&file_op, " Type Ethernet : {}, Initial Time Stamp : {}, Final Time Stamp : {}, Total Lenght :{} \n Source : {}_{} -> Destination : {}_{}, Protocol : {}, Application Protocol : {:?}  ",
-                     x.0.type_eth, x.1.ts_i, x.1.ts_f, x.1.len , x.0.source_address, x.0.source_port, x.0.destination_address, x.0.dest_port, x.0.protocol, ap_protocol).unwrap();
-        }
-    });
-    println!("GENERATED REPORT...");
+            if x.0.type_eth.clone() == "ARP".to_string() {
+                writeln!(&file_op, " Type Ethernet : {}, Initial Time Stamp : {}, Final Time Stamp : {}, Total Lenght :{} \n Source : {} -> Destination : {}, Operation : {}  ",
+                         x.0.type_eth, x.1.ts_i, x.1.ts_f, x.1.len, x.0.source_address, x.0.destination_address, x.0.operation).unwrap();
+            }else{
+                let mut ap_protocol= match from_port_to_application_protocol(x.0.dest_port) {
+                    x if x != AppProtocol::Other =>{x},
+                    _ => {
+                        from_port_to_application_protocol(x.0.source_port)
+                    }
+                };
+                writeln!(&file_op, " Type Ethernet : {}, Initial Time Stamp : {}, Final Time Stamp : {}, Total Lenght :{} \n Source : {}_{} -> Destination : {}_{}, Protocol : {}, Application Protocol : {:?}  ",
+                         x.0.type_eth, x.1.ts_i, x.1.ts_f, x.1.len , x.0.source_address, x.0.source_port, x.0.destination_address, x.0.dest_port, x.0.protocol, ap_protocol).unwrap();
+            }
+        });
+        println!("GENERATED REPORT...");
+    }else{
+        println!("No packet Found...")
+    }
+
 }
 
 fn wait_pause(cv: Arc<(Mutex<bool>, Condvar)>, cv6: Arc<(Mutex<bool>, Condvar)>, atm: &Arc<AtomicBool>, ext: &Arc<AtomicBool>, sender: Sender<String>){
@@ -514,6 +522,10 @@ fn wait_pause(cv: Arc<(Mutex<bool>, Condvar)>, cv6: Arc<(Mutex<bool>, Condvar)>,
                 let mut guard = cvar.wait_while(lock.lock().unwrap(),|pending|{
                     *pending
                 }).unwrap();
+                let (lock1,cvar1 ) = &*cv6;
+                let mut started = lock1.lock().unwrap();
+                *started = true;
+                cvar1.notify_all();
                 'inner : loop{
                     println!("Press R for resume or E to exit..");
                     stdin().read_line(&mut s).ok().expect("Failed to read line");
@@ -523,14 +535,14 @@ fn wait_pause(cv: Arc<(Mutex<bool>, Condvar)>, cv6: Arc<(Mutex<bool>, Condvar)>,
                             atm.store(false, Ordering::Relaxed);
                             *guard = true;
                             cvar.notify_all();
+                            *started = false;
+                            cvar1.notify_all();
                             break 'inner
                         },
                         "e" => {
                             ext.store(true, Ordering::Relaxed);
                             *guard = true;
                             cvar.notify_all();
-                            let (lock1,cvar1 ) = &*cv6;
-                            let mut started = lock1.lock().unwrap();
                             *started = false;
                             cvar1.notify_all();
                             break 'outer
@@ -567,6 +579,7 @@ fn wait_pause(cv: Arc<(Mutex<bool>, Condvar)>, cv6: Arc<(Mutex<bool>, Condvar)>,
 
 
 fn main() {
+    //COMMAND RUST
     let args = cli::RustArgs::parse();
     //PAUSE
     let cv = Arc::new((Mutex::new(true), Condvar::new()));
@@ -575,10 +588,7 @@ fn main() {
     let atm4 = Arc::clone(&atm3);
     //DURATION
     let cv3 = Arc::new((Mutex::new(false), Condvar::new()));
-    let mut cv4 = cv3.clone();
     let mut cv6 = Arc::clone(&cv3);
-    let atm = Arc::new(AtomicBool::new(false));
-    let atm2 = Arc::clone(&atm);
 
     let (sender, receiver) = mpsc::channel();
 
@@ -594,19 +604,21 @@ fn main() {
 
 
     //SUMMARY PACKET
-    let mut sum : Summary = HashMap::new();
+    let mut sum : Arc<Mutex<Summary>> = Arc::new(Mutex::new(HashMap::new()));
+    let mut sum_save = Arc::clone(&sum);
 
 
     let mut  file = match args.path {
         Some(p) => {
             create_file(p.clone());
+            println!("CREATE FILE IN : {}", p.display());
             p
         },
         None => {
             let mut x = dirs::desktop_dir().unwrap();
 
             let mut string_path= x.to_str().unwrap().to_string();
-            string_path.push_str("/sniffing");
+            string_path.push_str(r"\sniffing");
 
             if !Path::exists(Path::new(&string_path)){
                 println!("Create New Dir");
@@ -617,6 +629,7 @@ fn main() {
             let newdate = date.format("%Y-%m-%d_%H-%M-%S").to_string();
             p.push(format!("Sniffing{}.txt", newdate));
             create_file(p.clone());
+            println!("CREATE FILE IN : {}", p.display());
             p
         }
     };
@@ -624,22 +637,43 @@ fn main() {
     let duration = match args.duration{
         None  => {
             let mut x : u64 = 10;
+            println!("");
+            println!("No value. Every {} seconds a report will be generated!", x);
             x
         }
-        Some(s) => s as u64,
+        Some(s) => {
+            if s == 0{
+                let mut x : u64 = 10;
+                println!("");
+                println!("Every {} seconds a report will be generated!", s);
+                x
+            }else {
+                println!("");
+                println!("Every {} seconds a report will be generated!", s);
+                s as u64
+            }
+
+
+        },
 
     };
 
     let filter = match args.filter{
-        Some(s) => s,
+        Some(s) => {
+            println!("");
+            println!("Sniff only {}", s);
+            s
+        },
         None => {
             let mut x = "".to_string();
+            println!("");
+            println!("NO FILTER, SNIFF ALL");
             x
         }
     };
 
     let device = chose_device();
-    let mut capture_device = capturedevice(device);
+    let mut capture_device = capturedevice(device.clone());
 
     let t1 = thread::Builder::new().name("t1".into()).spawn(move || loop {
         if !ext_atm.load(Ordering::Relaxed){
@@ -649,8 +683,10 @@ fn main() {
                 started = cvar.wait(started).unwrap();
             }
             if ext_atm.load(Ordering::Relaxed){println!("FINISH SNIFFING");break}
-            println!("START SNIFFING");
+            //println!("START SNIFFING");
             start_sniffing(&atm4, &mut started, &mut capture_device, &cvar, &tx ,&filter);
+            println!("");
+            println!("--------------------------STOP SNIFFINFG---------------------------")
         }else {
             println!("FINISH SNIFFING");
             break;
@@ -667,14 +703,16 @@ fn main() {
     let t4 = thread::Builder::new().name("t4".into()).spawn(move || loop{
         if(!ext_atm3.load(Ordering::Relaxed)){
             match rx.try_recv(){
-                Ok(packet) => {parse_packet( &mut sum ,&cv4, &atm2,  &mut file,  &packet)},
+                Ok(packet) => {
+                    let mut sum1 = sum.lock().unwrap();
+                    if(ext_atm3.load(Ordering::Relaxed)){println!("FINISH PARSE PACKET ");break}
+                    parse_packet(&mut sum1, &packet);
+                },
                 Err(TryRecvError::Disconnected) => {println!("DISCONNESSO")},
                 Err(TryRecvError::Empty) => {}
             }
         }else {
-            println!("UPDATE FILE AND THEN EXIT!");
-            save_on_file(&mut file, &sum);
-            println!("FINISH PARSE PACKET AND UPDATE FILE");
+            println!("FINISH PARSE PACKET ");
             break
         }
 
@@ -683,18 +721,14 @@ fn main() {
 
     let t3 = thread::Builder::new().name("t3".into()).spawn(move || loop {
         if !ext_atm2.load(Ordering::Relaxed){
-            //thread::sleep(time::Duration::from_secs(duration));
             match receiver.recv_timeout(time::Duration::from_secs(duration)) {
                 Err(RecvTimeoutError::Timeout) => {
                     let (lock,cvar ) = &*cv3;
-                    let mut started = lock.lock().unwrap();
-                    if ext_atm2.load(Ordering::Relaxed){println!("FINISH DURATION ");break};
                     println!("FINISH WAIT DURATION GO TO UPDATE FILE");
-                    atm.store(true,Ordering::Relaxed);
-                    *started = true;
-                    cvar.notify_all();
-                    while *started {
-                        started = cvar.wait(started).unwrap();
+                    let guard = cvar.wait_while(lock.lock().unwrap(), |pending| *pending);
+                    if !ext_atm2.load(Ordering::Relaxed){
+                        let mut sum1 = sum_save.lock().unwrap();
+                        save_on_file(&mut file,&sum1);
                     }
                 }
                 Err(RecvTimeoutError::Disconnected) => {
@@ -702,22 +736,28 @@ fn main() {
                     break;
                 }
                 Ok(x) => {
+                    let mut sum1 = sum_save.lock().unwrap();
+                    save_on_file(&mut file,&sum1);
                     println!("FINISH DURATION");
                     break;
                 }
             }
 
         }else{
+            let mut sum1 = sum_save.lock().unwrap();
+            save_on_file(&mut file,&sum1);
             println!("FINISH DURATION ");
             break
         }
 
     }).unwrap();
 
+
     t3.join().unwrap();
     t1.join().unwrap();
     t2.join().unwrap();
     t4.join().unwrap();
+
 
     println!("EXIT");
 
