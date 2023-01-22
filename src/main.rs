@@ -185,7 +185,6 @@ fn ethernetDecode(ethernet_u8: &[u8]) -> VlanEthernetFrame{
         }
     };
 
-    //println!("{:x?}", ethernet);
     ethernet
 }
 
@@ -358,7 +357,6 @@ fn parse_packet(mut sum: &mut Summary, packet: &PacketOwned){
 
 fn start_sniffing(atm2: &Arc<AtomicBool>, started: &mut MutexGuard<bool>, cap: &mut Capture<Active>, cv: &&Condvar, tx: &Sender<PacketOwned>, filter: &String){
 
-    let lt = cap.get_datalink();
 
     match cap.filter(filter, true){
         Ok(_) => {println!("APPLIED FILTER")},
@@ -490,7 +488,9 @@ fn save_on_file(file: &mut PathBuf, sum: &Summary){
                          x.0.type_eth, x.1.ts_i, x.1.ts_f, x.1.len, x.0.source_address, x.0.destination_address, x.0.operation).unwrap();
             }else{
                 let mut ap_protocol= match from_port_to_application_protocol(x.0.dest_port) {
-                    x if x != AppProtocol::Other =>{x},
+                    x if x != AppProtocol::Other =>{
+                        x
+                    },
                     _ => {
                         from_port_to_application_protocol(x.0.source_port)
                     }
@@ -501,7 +501,7 @@ fn save_on_file(file: &mut PathBuf, sum: &Summary){
         });
         println!("GENERATED REPORT...");
     }else{
-        println!("No packet Found...")
+        println!("No packet Found...");
     }
 
 }
@@ -608,7 +608,7 @@ fn main() {
     let mut sum_save = Arc::clone(&sum);
 
 
-    let mut  file = match args.path {
+    let mut file = match args.path {
         Some(p) => {
             create_file(p.clone());
             println!("CREATE FILE IN : {}", p.display());
@@ -752,13 +752,9 @@ fn main() {
 
     }).unwrap();
 
-
     t3.join().unwrap();
     t1.join().unwrap();
     t2.join().unwrap();
     t4.join().unwrap();
-
-
     println!("EXIT");
-
 }
