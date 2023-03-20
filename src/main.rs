@@ -1,4 +1,9 @@
 mod cli;
+mod sniff;
+mod wait_input;
+mod parse;
+mod savefile;
+mod structs;
 
 use std::any::Any;
 use std::{fs, process, result, time};
@@ -25,7 +30,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::ptr::null;
 use std::fs::{create_dir_all, File, OpenOptions};
-use std::future::pending;
+//use std::future::pending;
 use dirs::desktop_dir;
 use serde::{Serialize, Deserialize};
 use serde_json::Result;
@@ -43,351 +48,7 @@ use std::io::prelude::*;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::rc::Rc;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum AppProtocol {
-    /// File Transfer Protocol
-    FTP,
-    /// Secure Shell
-    SSH,
-    /// Telnet
-    Telnet,
-    /// Simple Mail Transfer Protocol
-    SMTP,
-    /// Terminal Access Controller Access-Control System
-    TACACS,
-    /// Domain Name System
-    DNS,
-    /// Dynamic Host Configuration Protocol
-    DHCP,
-    /// Trivial File Transfer Protocol
-    TFTP,
-    /// Hypertext Transfer Protocol
-    HTTP,
-    /// Post Office Protocol
-    POP,
-    /// Network Time Protocol
-    NTP,
-    /// NetBIOS
-    NetBIOS,
-    /// Post Office Protocol 3 over TLS/SSL
-    POP3S,
-    /// Internet Message Access Protocol
-    IMAP,
-    /// Simple Network Management Protocol
-    SNMP,
-    /// Border Gateway Protocol
-    BGP,
-    /// Lightweight Directory Access Protocol
-    LDAP,
-    ///Hypertext Transfer Protocol over TLS/SSL
-    HTTPS,
-    /// Lightweight Directory Access Protocol over TLS/SSL
-    LDAPS,
-    /// File Transfer Protocol over TLS/SSL
-    FTPS,
-    /// Multicast DNS
-    #[allow(non_camel_case_types)]
-    mDNS,
-    ///Internet Message Access Protocol over TLS/SSL
-    IMAPS,
-    /// Simple Service Discovery Protocol
-    SSDP,
-    /// Extensible Messaging and Presence Protocol |
-    XMPP,
-    /// not identified
-    Other,
-}
-pub fn from_port_to_application_protocol(port: u16) -> AppProtocol {
-    match port {
-        20..=21 => AppProtocol::FTP,
-        22 => AppProtocol::SSH,
-        23 => AppProtocol::Telnet,
-        25 => AppProtocol::SMTP,
-        49 => AppProtocol::TACACS,
-        53 => AppProtocol::DNS,
-        67..=68 => AppProtocol::DHCP,
-        69 => AppProtocol::TFTP,
-        80 | 8080 => AppProtocol::HTTP,
-        109..=110 => AppProtocol::POP,
-        123 => AppProtocol::NTP,
-        137..=139 => AppProtocol::NetBIOS,
-        143 | 220 => AppProtocol::IMAP,
-        161..=162 | 199 => AppProtocol::SNMP,
-        179 => AppProtocol::BGP,
-        389 => AppProtocol::LDAP,
-        443 => AppProtocol::HTTPS,
-        636 => AppProtocol::LDAPS,
-        989..=990 => AppProtocol::FTPS,
-        993 => AppProtocol::IMAPS,
-        995 => AppProtocol::POP3S,
-        1900 => AppProtocol::SSDP,
-        5222 => AppProtocol::XMPP,
-        5353 => AppProtocol::mDNS,
-        _ => AppProtocol::Other,
-    }
-}
 
-#[derive(PartialEq, Eq, Hash, Debug, Serialize, Deserialize,Clone )]
-pub struct k{
-    pub type_eth : String,
-    pub source_address : String,
-    pub destination_address: String,
-    pub source_port: u16,
-    pub dest_port: u16,
-    pub operation : String,
-    pub protocol: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct summary{
-    pub ts_i: String,
-    pub ts_f: String,
-    pub len: u32,
-}
-
-type Summary = HashMap<k, summary>;
-
-/// Represents a owned packet
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PacketOwned {
-    pub header: PacketHeader,
-    pub data: Box<[u8]>,
-}
-
-/// Simple codec that tranform [`pcap::Packet`] into [`PacketOwned`]
-pub struct Codec;
-
-impl PacketCodec for Codec {
-    type Item = PacketOwned;
-
-    fn decode(&mut self, packet: Packet) -> Self::Item {
-        PacketOwned {
-            header: *packet.header,
-            data: packet.data.into(),
-        }
-    }
-}
-
-fn ts_toDate(ts_sec: i64, ts_usec: u32) -> String{
-    let naive = NaiveDateTime::from_timestamp_opt(ts_sec,ts_usec*1000).unwrap();
-    let _datetime: DateTime<Utc> = DateTime::from_utc(naive,Utc);
-    let datetime: DateTime<Local> = DateTime::from(_datetime);
-    let newdate = datetime.format("%Y-%m-%d %H:%M:%S%.6f").to_string();
-    newdate
-}
-
-fn ethernetDecode(ethernet_u8: &[u8]) -> VlanEthernetFrame{
-    let ethernet = match parse_vlan_ethernet_frame(ethernet_u8) {
-        Ok(x) => {x.1}
-        Err(_) => {
-            println!("ERRORE");
-            process::exit(0);
-        }
-    };
-
-    ethernet
-}
-
-fn ipv4Decode(ipv4_u8: &[u8], data: &[u8], src: &mut String, dst: &mut String, prot: &mut String, srp: &mut u16, dsp: &mut u16){
-    let ipv4 = parse_ipv4_header(ipv4_u8).unwrap();
-    *src = ipv4.1.source_addr.to_string();
-    *dst = ipv4.1.dest_addr.to_string();
-    //println!("{:?}",ipv4.1);
-
-    match ipv4.1.protocol {
-        pktparse::ip::IPProtocol::TCP => {
-            let tcp_u8 = &data[(14 + (ipv4.1.ihl as usize) * 4)..];
-            let tcp = parse_tcp_header(tcp_u8).unwrap();
-            *prot = "TCP".to_string();
-            *srp = tcp.1.source_port;
-            *dsp = tcp.1.dest_port;
-            //println!("{:?}", tcp.1);
-        },
-        pktparse::ip::IPProtocol::UDP => {
-            let udp_u8 = &data[(14 + (ipv4.1.ihl as usize) * 4)..];
-            let udp = parse_udp_header(udp_u8).unwrap();
-            *prot = "UDP".to_string();
-            *srp = udp.1.source_port;
-            *dsp = udp.1.dest_port;
-            // println!("{:?}", udp.1);
-        }
-
-        pktparse::ip::IPProtocol::IGMP =>{
-            *prot = "IGMP".to_string();
-            // println!("IGMP");
-        },
-
-        pktparse::ip::IPProtocol::ICMP => {
-            let icmp_u8 = &data[(14 + (ipv4.1.ihl as usize) * 4)..];
-            let icmp = parse_icmp_header(icmp_u8).unwrap();
-            *prot = "ICMP".to_string();
-            //println!("{:?}", icmp.1);
-        },
-
-        _=> *prot = "IPv4 PROTOCOL unknown".to_string()
-    }
-}
-
-fn ipv6Decode(ipv6_u8: &[u8], data: &[u8], src: &mut String, dst: &mut String, prot: &mut String, srp: &mut u16, dsp: &mut u16){
-    let ipv6 = parse_ipv6_header(ipv6_u8).unwrap();
-    *src = ipv6.1.source_addr.to_string();
-    *dst = ipv6.1.dest_addr.to_string();
-    //println!("{:?}",ipv6.1);
-
-    match ipv6.1.next_header {
-        pktparse::ip::IPProtocol::TCP => {
-            let tcp_u8 = &data[54..];
-            let tcp = parse_tcp_header(tcp_u8).unwrap();
-            *prot = "TCP".to_string();
-            *srp = tcp.1.source_port;
-            *dsp = tcp.1.dest_port;
-            // println!("{:?}", tcp.1);
-        },
-        pktparse::ip::IPProtocol::UDP => {
-            let udp_u8 = &data[54..];
-            let udp = parse_udp_header(udp_u8).unwrap();
-            *prot = "UDP".to_string();
-            *srp = udp.1.source_port;
-            *dsp = udp.1.dest_port;
-            // println!("{:?}", udp.1);
-        }
-
-        pktparse::ip::IPProtocol::ICMP6 =>{
-            *prot = "ICMP6".to_string();
-           // println!("ICMP6");
-        },
-
-        _=> *prot = "IPv6 PROTOCOL unknown".to_string()
-    }
-}
-
-fn arpDecode(arp_u8: &[u8], src: &mut String, dst: &mut String, operation :&mut String){
-    let arp = parse_arp_pkt(arp_u8).unwrap();
-    *src = arp.1.src_addr.to_string();
-    *dst = arp.1.dest_addr.to_string();
-    match arp.1.operation {
-        pktparse::arp::Operation::Reply => *operation = "Reply".to_string(),
-        pktparse::arp::Operation::Request => *operation ="Request".to_string(),
-        pktparse::arp::Operation::Other(p) => *operation = "Other".to_string()
-    }
-}
-
-
-fn try_toDecode(data : &[u8], sum: &mut Summary, newdate: String, i: u32){
-    let ethernet = ethernetDecode( &data[..14]);
-    let mut tpe: String = String::new();
-    let mut src: String = String::new();
-    let mut dst: String = String::new();
-    let mut prot: String = String::new();
-    let mut operation: String = "".to_string();
-    let mut srp: u16 = 0;
-    let mut dsp: u16 = 0;
-
-    match ethernet.ethertype {
-        pktparse::ethernet::EtherType::IPv4 => {
-            tpe = "IPv4".to_string();
-            ipv4Decode(&data[14..], data, &mut src, &mut dst, &mut prot, &mut srp, &mut dsp);
-        },
-        pktparse::ethernet::EtherType::IPv6 => {
-            tpe = "IPv6".to_string();
-            ipv6Decode(&data[14..], data,  &mut src, &mut dst, &mut prot, &mut srp, &mut dsp);
-        },
-
-        pktparse::ethernet::EtherType::ARP =>{
-            tpe = "ARP".to_string();
-            arpDecode(&data[14..],  &mut src, &mut dst, &mut operation);
-        },
-        _ => println!("ETHERNET TYPE unknown")
-    }
-
-    match sum.entry(k {
-        type_eth: tpe.clone(),
-        source_address: dst.clone(),
-        destination_address: src.clone(),
-        source_port: dsp.clone(),
-        dest_port: srp.clone(),
-        operation: operation.clone(),
-        protocol: prot.clone()
-    }) {
-        Occupied(e) => {
-            sum.entry(k {
-                type_eth: tpe.clone(),
-                source_address: dst.clone(),
-                destination_address: src.clone(),
-                source_port: dsp.clone(),
-                dest_port: srp.clone(),
-                operation: operation.clone(),
-                protocol: prot.clone()
-            }).and_modify(|x| {
-                x.len += i;
-                x.ts_f = newdate.clone();
-            });
-        },
-        Vacant(e) => {
-            sum.entry(k {
-                type_eth: tpe.clone(),
-                source_address: src.clone(),
-                destination_address: dst.clone(),
-                source_port: srp.clone(),
-                dest_port: dsp.clone(),
-                operation: operation.clone(),
-                protocol: prot.clone()
-            }).and_modify(|x| {
-                x.len += i;
-                x.ts_f = newdate.clone();
-            }).or_insert(summary {
-                ts_i: newdate.clone(),
-                ts_f: newdate.clone(),
-                len: i,
-            });
-        }
-    }
-
-   //sum.iter().for_each(|x|println!("{:?}",x));
-
-}
-
-
-fn parse_packet(mut sum: &mut Summary, packet: &PacketOwned){
-    let newdate = ts_toDate(packet.header.ts.tv_sec as i64, packet.header.ts.tv_usec as u32);
-    try_toDecode(&packet.data, &mut sum, newdate, packet.header.len);
-}
-
-
-
-fn start_sniffing(atm2: &Arc<AtomicBool>, started: &mut MutexGuard<bool>, cap: &mut Capture<Active>, cv: &&Condvar, tx: &Sender<PacketOwned>, filter: &String){
-
-
-    match cap.filter(filter, true){
-        Ok(_) => {println!("APPLIED FILTER")},
-        Err(e) => {
-            println!("WRONG USAGE OF FILTER! PLEASE INSERT A VALID FILTER");
-            process::exit(1);
-        }
-    }
-    println!("");
-    println!("--------------------------SNIFFING------------------------------");
-    while let packet = cap.next_packet() {
-
-        if atm2.load(Ordering::Relaxed) {
-            **started = false;
-            cv.notify_all();
-            break
-        }
-
-
-        match packet {
-            Ok(p) => {
-                let pa = Codec.decode(p);
-                tx.send(pa);
-            }
-            Err(e) => {
-                continue
-            }
-        }
-    }
-
-}
 
 fn capturedevice(device: Device) -> Capture<Active>{
     println!("{:?}", device.addresses.first().unwrap());
@@ -469,114 +130,6 @@ fn create_file(p : PathBuf) -> File{
     file
 }
 
-fn save_on_file(file: &mut PathBuf, sum: &Summary){
-    if sum.len() != 0{
-        let mut file_op= OpenOptions::new()
-            .write(true)
-            .append(true)
-            .open(&file)
-            .unwrap();
-
-        writeln!(&file_op, "--------------------------------------------------------------------------------------------------------------------------------------------------------------").unwrap();
-        writeln!(&file_op, "--------------------------------------------------------------------------------------------------------------------------------------------------------------").unwrap();
-
-        sum.iter().for_each(|x|{
-            writeln!(&file_op,"\n");
-
-            if x.0.type_eth.clone() == "ARP".to_string() {
-                writeln!(&file_op, " Type Ethernet : {}, Initial Time Stamp : {}, Final Time Stamp : {}, Total Lenght :{} \n Source : {} -> Destination : {}, Operation : {}  ",
-                         x.0.type_eth, x.1.ts_i, x.1.ts_f, x.1.len, x.0.source_address, x.0.destination_address, x.0.operation).unwrap();
-            }else{
-                let mut ap_protocol= match from_port_to_application_protocol(x.0.dest_port) {
-                    x if x != AppProtocol::Other =>{
-                        x
-                    },
-                    _ => {
-                        from_port_to_application_protocol(x.0.source_port)
-                    }
-                };
-                writeln!(&file_op, " Type Ethernet : {}, Initial Time Stamp : {}, Final Time Stamp : {}, Total Lenght :{} \n Source : {}_{} -> Destination : {}_{}, Protocol : {}, Application Protocol : {:?}  ",
-                         x.0.type_eth, x.1.ts_i, x.1.ts_f, x.1.len , x.0.source_address, x.0.source_port, x.0.destination_address, x.0.dest_port, x.0.protocol, ap_protocol).unwrap();
-            }
-        });
-        println!("GENERATED REPORT...");
-    }else{
-        println!("No packet Found...");
-    }
-
-}
-
-fn wait_pause(cv: Arc<(Mutex<bool>, Condvar)>, cv6: Arc<(Mutex<bool>, Condvar)>, atm: &Arc<AtomicBool>, ext: &Arc<AtomicBool>, sender: Sender<String>){
-    let mut s = String::new();
-    let (lock,cvar ) = &*cv;
-
-    'outer: loop{
-        println!("Press P for pause or E for exit and save on file");
-        //TAKE INPUT
-        stdin().read_line(&mut s).ok().expect("Failed to read line");
-        //CHECK INPUT AND START SNIFFING
-        match s.trim().to_ascii_lowercase().as_str() {
-            "p" => {
-                s.clear();
-                atm.store(true, Ordering::Relaxed);
-                let mut guard = cvar.wait_while(lock.lock().unwrap(),|pending|{
-                    *pending
-                }).unwrap();
-                let (lock1,cvar1 ) = &*cv6;
-                let mut started = lock1.lock().unwrap();
-                *started = true;
-                cvar1.notify_all();
-                'inner : loop{
-                    println!("Press R for resume or E to exit..");
-                    stdin().read_line(&mut s).ok().expect("Failed to read line");
-                    match s.trim().to_ascii_lowercase().as_str() {
-                        "r" => {
-                            s.clear();
-                            atm.store(false, Ordering::Relaxed);
-                            *guard = true;
-                            cvar.notify_all();
-                            *started = false;
-                            cvar1.notify_all();
-                            break 'inner
-                        },
-                        "e" => {
-                            ext.store(true, Ordering::Relaxed);
-                            *guard = true;
-                            cvar.notify_all();
-                            *started = false;
-                            cvar1.notify_all();
-                            break 'outer
-                        }
-                        _ => {
-                            s.clear();
-                            println!("Command Not Found...");
-                            continue
-                        }
-                    }
-
-                }
-            },
-            "e" => {
-                ext.store(true, Ordering::Relaxed);
-                atm.store(true, Ordering::Relaxed);
-                let mut guard = cvar.wait_while(lock.lock().unwrap(),|pending|{
-                    *pending
-                }).unwrap();
-                *guard = true;
-                cvar.notify_all();
-                break 'outer
-            }
-            _ => {
-                s.clear();
-                println!("Command Not Found...");
-                continue
-            }
-        }
-    }
-    sender.send("e".to_string());
-}
-
-
 
 fn main() {
     //COMMAND RUST
@@ -599,12 +152,12 @@ fn main() {
     let ext_atm3 = Arc::clone(&ext_atm);
 
     //FOR PARSE PACKET
-    let (tx, rx) : (Sender<PacketOwned>, Receiver<PacketOwned>) = mpsc::channel();
+    let (tx, rx) : (Sender<structs::packetow::PacketOwned>, Receiver<structs::packetow::PacketOwned>) = mpsc::channel();
 
 
 
     //SUMMARY PACKET
-    let mut sum : Arc<Mutex<Summary>> = Arc::new(Mutex::new(HashMap::new()));
+    let mut sum : Arc<Mutex<structs::summaryf::Summary>> = Arc::new(Mutex::new(HashMap::new()));
     let mut sum_save = Arc::clone(&sum);
 
 
@@ -684,7 +237,7 @@ fn main() {
             }
             if ext_atm.load(Ordering::Relaxed){println!("FINISH SNIFFING");break}
             //println!("START SNIFFING");
-            start_sniffing(&atm4, &mut started, &mut capture_device, &cvar, &tx ,&filter);
+            sniff::start_sniffing(&atm4, &mut started, &mut capture_device, &cvar, &tx ,&filter);
             println!("");
             println!("--------------------------STOP SNIFFINFG---------------------------")
         }else {
@@ -695,7 +248,7 @@ fn main() {
 
 
     let t2 = thread::Builder::new().name("t2".into()).spawn(move || {
-        wait_pause( cv, cv6, &atm3, &ext_atm1, sender);
+        wait_input::wait_pause( cv, cv6, &atm3, &ext_atm1, sender);
         println!("FINISH WAIT COMMAND");
     }).unwrap();
 
@@ -706,7 +259,7 @@ fn main() {
                 Ok(packet) => {
                     let mut sum1 = sum.lock().unwrap();
                     if(ext_atm3.load(Ordering::Relaxed)){println!("FINISH PARSE PACKET ");break}
-                    parse_packet(&mut sum1, &packet);
+                    parse::parse_packet(&mut sum1, &packet);
                 },
                 Err(TryRecvError::Disconnected) => {println!("DISCONNESSO")},
                 Err(TryRecvError::Empty) => {}
@@ -728,7 +281,7 @@ fn main() {
                     let guard = cvar.wait_while(lock.lock().unwrap(), |pending| *pending);
                     if !ext_atm2.load(Ordering::Relaxed){
                         let mut sum1 = sum_save.lock().unwrap();
-                        save_on_file(&mut file,&sum1);
+                        savefile::save_on_file(&mut file,&sum1);
                     }
                 }
                 Err(RecvTimeoutError::Disconnected) => {
@@ -737,7 +290,7 @@ fn main() {
                 }
                 Ok(x) => {
                     let mut sum1 = sum_save.lock().unwrap();
-                    save_on_file(&mut file,&sum1);
+                    savefile::save_on_file(&mut file,&sum1);
                     println!("FINISH DURATION");
                     break;
                 }
@@ -745,7 +298,7 @@ fn main() {
 
         }else{
             let mut sum1 = sum_save.lock().unwrap();
-            save_on_file(&mut file,&sum1);
+            savefile::save_on_file(&mut file,&sum1);
             println!("FINISH DURATION ");
             break
         }
